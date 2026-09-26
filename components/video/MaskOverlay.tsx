@@ -54,6 +54,7 @@ export function MaskOverlay({ outlineOnly = false }: { outlineOnly?: boolean }) 
       width={w}
       height={h}
       aria-hidden="true"
+      data-layer="masks"
       className="pointer-events-none absolute inset-0 size-full transition-opacity duration-150"
       style={{ opacity: visible ? (outlineOnly ? 0.9 : Math.max(0.05, opacity * 1.6)) : 0 }}
     />

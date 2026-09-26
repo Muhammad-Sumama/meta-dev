@@ -3,8 +3,9 @@
 /**
  * Frame-accurate control of an HTMLVideoElement.
  *
- * - Seeks land mid-frame ((f + 0.5) / fps) so rounding never shows the
- *   neighboring frame.
+ * - Seeks (and pauses) land mid-frame ((f + 0.5) / fps): the picture there
+ *   is exactly frame f as the server samples it, even for variable frame
+ *   rate, and rounding never shows the neighboring frame.
  * - During playback the presented frame comes from
  *   requestVideoFrameCallback (exact media time of the composited frame),
  *   falling back to requestAnimationFrame + currentTime.
@@ -58,7 +59,12 @@ export class VideoController {
     const onPause = () => {
       this.onPlayingChange(false);
       this.stopLoop();
-      this.emit(this.frameAt(el.currentTime));
+      const f = this.frameAt(el.currentTime);
+      // Park on the slot center so the picture is exactly frame f as the
+      // server defines it (matters for variable-frame-rate video).
+      const center = this.timeOf(f, el);
+      if (!el.ended && Math.abs(el.currentTime - center) > 1e-4) el.currentTime = center;
+      this.emit(f);
     };
     const onSeeked = () => {
       if (el.paused) this.emit(this.frameAt(el.currentTime));
@@ -77,6 +83,12 @@ export class VideoController {
 
   frameAt(time: number) {
     return Math.max(0, Math.min(this.frameCount - 1, Math.floor(time * this.fps + 1e-3)));
+  }
+
+  /** Mid-frame time of frame `f`: the picture there is frame f on the server's grid (services/video/frames.ts). */
+  private timeOf(f: number, el: HTMLVideoElement) {
+    const duration = Number.isFinite(el.duration) ? el.duration : Infinity;
+    return Math.min((f + 0.5) / this.fps, Math.max(0, duration - 0.001));
   }
 
   private startLoop() {
@@ -132,8 +144,7 @@ export class VideoController {
     const f = Math.max(0, Math.min(this.frameCount - 1, Math.round(frame)));
     if (el) {
       if (!el.paused) el.pause();
-      const duration = Number.isFinite(el.duration) ? el.duration : Infinity;
-      el.currentTime = Math.min((f + 0.5) / this.fps, Math.max(0, duration - 0.001));
+      el.currentTime = this.timeOf(f, el);
     }
     this.emit(f);
   }

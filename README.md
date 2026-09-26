@@ -374,7 +374,7 @@ at scale it would move to the GPU workers (or FFmpeg filter graphs with
 ## Testing
 
 ```bash
-npm test                 # 151 Vitest tests: unit, components (jsdom), integration
+npm test                 # 155 Vitest tests: unit, components (jsdom), integration
 npm run test:e2e         # Playwright (set PLAYWRIGHT_CHROMIUM_EXECUTABLE to reuse a local Chromium)
 cd inference && pytest   # Python contract tests (no GPU needed)
 ```
@@ -402,7 +402,10 @@ cd inference && pytest   # Python contract tests (no GPU needed)
 - **Python** — the inference server's HTTP contract with a fake backend, plus
   SAM 2 frame extraction on the web app's frame grid.
 - **E2E** — landing page → Try Demo → AI command → effect → shortcuts/undo →
-  export → download, plus an accessible-name audit of every editor button.
+  export → download; a real upload of a rotated variable-frame-rate phone
+  clip → preview proxy → click-to-track, comparing the decoded video pixels
+  with the mask overlay's pixels frame by frame (and after pausing mid-play);
+  plus an accessible-name audit of every editor button.
 
 ## Security
 
