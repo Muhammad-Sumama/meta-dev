@@ -46,7 +46,9 @@ class Backend(Protocol):
     def status(self) -> str: ...
     def has_grounding(self) -> bool: ...
     def get_session(self, session_id: str) -> Optional[SessionInfo]: ...
-    def create_session(self, session_id: str, video_path: str, mask_width: int, mask_height: int) -> SessionInfo: ...
+    def create_session(
+        self, session_id: str, video_path: str, mask_width: int, mask_height: int, fps: Optional[float] = None
+    ) -> SessionInfo: ...
     def delete_session(self, session_id: str) -> None: ...
     def segment(self, session_id: str, kf: Keyframe) -> tuple[np.ndarray, float]: ...
     def propagate(
@@ -74,14 +76,24 @@ def _resize_logits(logits: np.ndarray, width: int, height: int) -> np.ndarray:
     return np.asarray(img.resize((width, height), Image.BILINEAR)) > 0
 
 
-def extract_frames(video_path: str, out_dir: Path, max_side: int) -> tuple[int, int, int]:
+def frame_filters(max_side: int, fps: Optional[float] = None) -> str:
+    """FFmpeg filters for SAM 2 input frames.
+
+    With ``fps`` (the rate the web app uses), frame ``i`` is the picture shown at
+    ``(i + 0.5) / fps`` — the same grid as services/video/frames.ts — so frame
+    indices agree with the app even for variable-frame-rate (phone) video.
+    """
+    scale = f"scale='if(gt(iw,ih),min({max_side},iw),-2)':'if(gt(iw,ih),-2,min({max_side},ih))'"
+    return f"fps={fps!r}:start_time=0,{scale}" if fps and fps > 0 else scale
+
+
+def extract_frames(video_path: str, out_dir: Path, max_side: int, fps: Optional[float] = None) -> tuple[int, int, int]:
     """Decode frames to JPEGs named 00000.jpg… (the layout SAM 2's init_state expects)."""
     out_dir.mkdir(parents=True, exist_ok=True)
     ffmpeg = os.environ.get("FFMPEG_PATH", "ffmpeg")
-    scale = f"scale='if(gt(iw,ih),min({max_side},iw),-2)':'if(gt(iw,ih),-2,min({max_side},ih))'"
     subprocess.run(
-        [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-i", video_path, "-vf", scale,
-         "-q:v", "2", "-start_number", "0", str(out_dir / "%05d.jpg")],
+        [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-i", video_path, "-an", "-sn",
+         "-vf", frame_filters(max_side, fps), "-q:v", "2", "-start_number", "0", str(out_dir / "%05d.jpg")],
         check=True,
     )
     frames = sorted(out_dir.glob("*.jpg"))
@@ -154,12 +166,14 @@ class Sam2Backend:
         self._sessions.move_to_end(session_id)
         return s["info"]
 
-    def create_session(self, session_id: str, video_path: str, mask_width: int, mask_height: int) -> SessionInfo:
+    def create_session(
+        self, session_id: str, video_path: str, mask_width: int, mask_height: int, fps: Optional[float] = None
+    ) -> SessionInfo:
         if self._status != "ok":
             raise RuntimeError("model not ready")
         frames_dir = self._workdir / session_id
         shutil.rmtree(frames_dir, ignore_errors=True)
-        count, w, h = extract_frames(video_path, frames_dir, self._frame_max_side)
+        count, w, h = extract_frames(video_path, frames_dir, self._frame_max_side, fps)
         with self._lock:
             state = self._predictor.init_state(
                 video_path=str(frames_dir),

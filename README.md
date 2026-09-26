@@ -374,7 +374,7 @@ at scale it would move to the GPU workers (or FFmpeg filter graphs with
 ## Testing
 
 ```bash
-npm test                 # 137 Vitest tests: unit, components (jsdom), integration
+npm test                 # 151 Vitest tests: unit, components (jsdom), integration
 npm run test:e2e         # Playwright (set PLAYWRIGHT_CHROMIUM_EXECUTABLE to reuse a local Chromium)
 cd inference && pytest   # Python contract tests (no GPU needed)
 ```
@@ -394,6 +394,13 @@ cd inference && pytest   # Python contract tests (no GPU needed)
   tracking, range streaming, all export formats (verifying real alpha in
   WebM, PNG zip contents, frame counts after FPS conversion), cancellation,
   deletion, and the mock quality regression.
+- **Formats** — generated ProRes `.mov` (PCM audio), H.264-with-B-frames
+  `.mkv` (AAC) and a rotated, variable-frame-rate HEVC `.mov` (phone-style):
+  the H.264 and VP9 preview proxies show exactly the frame masks were computed
+  on, portrait video is analysed upright, box → track matches ground truth,
+  and exports keep display orientation, every frame and the audio.
+- **Python** — the inference server's HTTP contract with a fake backend, plus
+  SAM 2 frame extraction on the web app's frame grid.
 - **E2E** — landing page → Try Demo → AI command → effect → shortcuts/undo →
   export → download, plus an accessible-name audit of every editor button.
 
@@ -438,8 +445,11 @@ cd inference && pytest   # Python contract tests (no GPU needed)
 - Masks are stored at analysis resolution (default 512 px) and upscaled with
   feathering; hair-level detail needs a higher `ANALYSIS_MAX_SIZE` with SAM 2
   (and a matting model — see roadmap).
-- Frame indexing assumes constant frame rate; variable-frame-rate phone
-  footage may drift by a frame. Re-encode VFR clips to CFR for exact timing.
+- Variable-frame-rate video (typical of phones) is placed on a constant grid
+  at its average frame rate: frame *i* is the picture on screen at
+  (*i* + ½) / fps, which is what the browser shows, so masks stay aligned.
+  Where the phone dropped frames a slot repeats the previous picture, and
+  bursts faster than the average rate are thinned.
 - “Remove object” uses a clean-plate median, which is exact for static
   cameras with moving subjects and approximate otherwise; it is not generative
   inpainting.

@@ -6,12 +6,9 @@
  * Uses the bundled demo clip and mock inference. Requires FFmpeg (bundled via
  * ffmpeg-static / @ffprobe-installer, or on PATH).
  */
-import { spawnSync } from "node:child_process";
-import { createReadStream, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { createRequire } from "node:module";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { Readable } from "node:stream";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { decodeMask } from "@/lib/mask/rle";
 import { setConfigForTesting } from "@/lib/server/config";
@@ -25,57 +22,10 @@ import * as trackRoute from "@/app/api/projects/[projectId]/track/route";
 import * as trackItemRoute from "@/app/api/projects/[projectId]/tracks/[trackId]/route";
 import * as healthRoute from "@/app/api/health/route";
 import * as jobRoute from "@/app/api/jobs/[jobId]/route";
-import * as projectsRoute from "@/app/api/projects/route";
-import { getJobQueue } from "@/services/jobs/runtime";
 import { DEMO_VIDEO, GT_FILE, evaluateDemo } from "../helpers/evalDemo";
+import { type Handler, call, ffprobeJson, upload, waitJob } from "../helpers/routes";
 
-type Handler = (req: Request, ctx: { params: Promise<Record<string, string>> }) => Promise<Response>;
-
-const BASE = "http://localhost";
 let dataDir: string;
-
-async function call(handler: Handler, opts: { url?: string; method?: string; body?: unknown; headers?: Record<string, string>; params?: Record<string, string> } = {}) {
-  const init: RequestInit & { duplex?: string } = { method: opts.method ?? "GET", headers: opts.headers };
-  if (opts.body instanceof ReadableStream) {
-    init.body = opts.body;
-    init.duplex = "half";
-  } else if (opts.body !== undefined) {
-    init.body = JSON.stringify(opts.body);
-    init.headers = { "content-type": "application/json", ...opts.headers };
-  }
-  const res = await handler(new Request(`${BASE}${opts.url ?? "/"}`, init), { params: Promise.resolve(opts.params ?? {}) });
-  const type = res.headers.get("content-type") ?? "";
-  const json = type.includes("application/json") ? await res.clone().json() : null;
-  return { res, json };
-}
-
-function fileStream(file: string, start = 0, end?: number) {
-  return Readable.toWeb(createReadStream(file, { start, end })) as ReadableStream<Uint8Array>;
-}
-
-async function upload(file: string, name: string, end?: number) {
-  const size = end !== undefined ? end + 1 : statSync(file).size;
-  return call(projectsRoute.POST as Handler, {
-    method: "POST",
-    url: "/api/projects",
-    body: fileStream(file, 0, end),
-    headers: { "x-file-name": encodeURIComponent(name), "content-length": String(size) },
-  });
-}
-
-async function waitJob(id: string) {
-  const job = await getJobQueue().waitFor(id, 180_000);
-  const { json } = await call(jobRoute.GET as Handler, { url: `/api/jobs/${id}`, params: { jobId: id } });
-  expect(json.job.status).toBe(job.status);
-  return json.job;
-}
-
-function ffprobeJson(file: string) {
-  const req = createRequire(path.join(process.cwd(), "package.json"));
-  const probe = (req("@ffprobe-installer/ffprobe") as { path: string }).path;
-  const out = spawnSync(probe, ["-v", "error", "-print_format", "json", "-show_streams", "-count_packets", file], { encoding: "utf8" });
-  return JSON.parse(out.stdout) as { streams: Array<Record<string, string | number | Record<string, string>>> };
-}
 
 beforeAll(() => {
   dataDir = mkdtempSync(path.join(os.tmpdir(), "opensam-it-"));

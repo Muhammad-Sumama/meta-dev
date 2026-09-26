@@ -47,7 +47,7 @@ class SessionMeta(BaseModel):
     session_id: str
     mask_width: int = Field(gt=0, le=4096)
     mask_height: int = Field(gt=0, le=4096)
-    fps: Optional[float] = None
+    fps: Optional[float] = Field(default=None, gt=0, le=1000)
     frame_count: Optional[int] = None
     video_path: Optional[str] = None
 
@@ -155,7 +155,7 @@ def create_app(backend: Optional[Backend] = None) -> FastAPI:
                 raise HTTPException(status_code=403, detail="video_path outside shared storage")
             if not path.is_file():
                 raise HTTPException(status_code=404, detail="video not found")
-            info = be.create_session(meta.session_id, str(path), meta.mask_width, meta.mask_height)
+            info = be.create_session(meta.session_id, str(path), meta.mask_width, meta.mask_height, meta.fps)
             return info.__dict__
 
         form = await request.form()
@@ -177,7 +177,7 @@ def create_app(backend: Optional[Backend] = None) -> FastAPI:
                     if size > MAX_UPLOAD_BYTES:
                         raise HTTPException(status_code=413, detail="video too large")
                     fh.write(chunk)
-            info = be.create_session(meta.session_id, str(dest), meta.mask_width, meta.mask_height)
+            info = be.create_session(meta.session_id, str(dest), meta.mask_width, meta.mask_height, meta.fps)
             return info.__dict__
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)

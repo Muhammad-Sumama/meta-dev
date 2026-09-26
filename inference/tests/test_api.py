@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import subprocess
 from typing import Iterator, Optional
 
 import numpy as np
@@ -14,7 +16,7 @@ os.environ["OPENSAM_INFERENCE_NO_AUTOLOAD"] = "1"
 from fastapi.testclient import TestClient  # noqa: E402
 
 from app import rle  # noqa: E402
-from app.backend import Keyframe, SessionInfo  # noqa: E402
+from app.backend import Keyframe, SessionInfo, extract_frames, frame_filters  # noqa: E402
 from app.main import create_app  # noqa: E402
 
 
@@ -37,8 +39,9 @@ class FakeBackend:
     def get_session(self, session_id: str) -> Optional[SessionInfo]:
         return self.sessions.get(session_id)
 
-    def create_session(self, session_id, video_path, mask_width, mask_height):
+    def create_session(self, session_id, video_path, mask_width, mask_height, fps=None):
         assert os.path.getsize(video_path) > 0
+        self.last_fps = fps
         info = SessionInfo(session_id, 10, 64, 32, mask_width, mask_height)
         self.sessions[session_id] = info
         return info
@@ -108,6 +111,7 @@ def test_session_lifecycle(client):
     res = create(c, tmp)
     assert res.status_code == 200
     assert res.json()["mask_width"] == 16
+    assert be.last_fps == 30
     assert c.get("/v1/sessions/prj_x-v1").status_code == 200
     assert c.delete("/v1/sessions/prj_x-v1").json() == {"ok": True}
     assert "prj_x-v1" not in be.sessions
@@ -173,3 +177,23 @@ def test_api_key(tmp_path, monkeypatch):
     assert c.get("/v1/sessions/abc", headers={"authorization": "Bearer wrong"}).status_code == 401
     assert c.get("/v1/sessions/abc", headers={"authorization": "Bearer s3cret"}).status_code == 404
     assert c.get("/health").status_code == 200
+
+
+def test_frame_grid_matches_web_app():
+    # Same grid as services/video/frames.ts: fps filter anchored at 0.
+    assert frame_filters(1024, 29.97002997002997).startswith("fps=29.97002997002997:start_time=0,scale=")
+    assert frame_filters(1024, None).startswith("scale=")
+
+
+@pytest.mark.skipif(shutil.which(os.environ.get("FFMPEG_PATH", "ffmpeg")) is None, reason="ffmpeg not installed")
+def test_extract_frames_uses_app_frame_grid(tmp_path):
+    ffmpeg = os.environ.get("FFMPEG_PATH", "ffmpeg")
+    video = tmp_path / "vfr.mp4"
+    # 60 frames at 30 fps with every fifth dropped → 48 frames over 2 s (24 fps average, VFR).
+    subprocess.run(
+        [ffmpeg, "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=s=64x36:r=30:d=2",
+         "-vf", "select='not(eq(mod(n\\,5)\\,2))'", "-vsync", "vfr", "-pix_fmt", "yuv420p", str(video)],
+        check=True,
+    )
+    count, w, h = extract_frames(str(video), tmp_path / "frames", 1024, 24.0)
+    assert (count, w, h) == (48, 64, 36)

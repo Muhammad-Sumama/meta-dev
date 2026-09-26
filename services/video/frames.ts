@@ -6,8 +6,16 @@ import { killProcess, spawnFFmpeg } from "./ffmpeg";
  * Streams decoded frames from FFmpeg as raw pixel buffers.
  *
  * Frames are produced lazily (async generator) so at most a few frames are
- * held in memory regardless of video length. Seeking uses input `-ss`, which
- * FFmpeg decodes accurately to the requested timestamp.
+ * held in memory regardless of video length.
+ *
+ * Frame `i` is defined on an absolute grid: the picture on screen at time
+ * `(i + 0.5) / fps`, i.e. the latest decoded frame whose timestamp rounds to
+ * slot ≤ i. That is what a browser shows after seeking to mid-frame (see
+ * lib/client/video.ts), and for constant-frame-rate video it is simply the
+ * i-th frame. The grid is enforced with the `fps` filter anchored at 0, and
+ * seeks keep the frames before the seek point (`-noaccurate_seek`) so the
+ * filter can pick the right one — so a single-frame read, a stream from 0 and
+ * a stream from the middle all agree, even on variable-frame-rate phone video.
  */
 
 export type PixelFormat = "rgb24" | "rgba" | "gray";
@@ -37,9 +45,9 @@ export function frameByteLength(width: number, height: number, fmt: PixelFormat)
   return width * height * BYTES_PER_PIXEL[fmt];
 }
 
-/** Timestamp that lands inside frame `index` (half a frame early to avoid rounding past it). */
+/** Start of grid slot `index`; `readFrames` seeks here and re-anchors the grid at 0. */
 export function seekTimeForFrame(index: number, fps: number): number {
-  return index <= 0 ? 0 : (index - 0.5) / fps;
+  return index <= 0 ? 0 : index / fps;
 }
 
 export async function* readFrames(file: string, opts: FrameReadOptions): AsyncGenerator<DecodedFrame> {
@@ -47,16 +55,17 @@ export async function* readFrames(file: string, opts: FrameReadOptions): AsyncGe
   const frameSize = frameByteLength(opts.width, opts.height, fmt);
   const start = Math.max(0, opts.startFrame ?? 0);
   const filters = [
-    ...(opts.outputFps ? [`fps=${opts.outputFps}`] : []),
+    `fps=${opts.outputFps ?? opts.fps}:start_time=0`,
     `scale=${opts.width}:${opts.height}:flags=area`,
     `format=${fmt}`,
   ];
   const args = [
-    ...(start > 0 ? ["-ss", seekTimeForFrame(start, opts.fps).toFixed(6)] : []),
+    ...(start > 0 ? ["-noaccurate_seek", "-ss", seekTimeForFrame(start, opts.fps).toFixed(6)] : []),
     "-i", file,
     "-map", "0:v:0",
     "-an", "-sn",
     "-vf", filters.join(","),
+    "-fps_mode", "passthrough",
     ...(opts.count !== undefined ? ["-frames:v", String(Math.max(1, Math.floor(opts.count)))] : []),
     "-f", "rawvideo",
     "-pix_fmt", fmt,

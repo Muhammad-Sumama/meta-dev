@@ -76,7 +76,10 @@ column-major RLE).
 | `POST /v1/sessions/{id}/propagate` | `{keyframes: [prompt…], start_frame, end_frame, direction}` | NDJSON stream of `{"type":"mask","frame_index",counts}`, `{"type":"progress",done,total}`, then `{"type":"done"}` or `{"type":"error"}` |
 | `DELETE /v1/sessions/{id}` | – | `{ok: true}` |
 
-`meta` = `{session_id, mask_width, mask_height, fps?, frame_count?}`.
+`meta` = `{session_id, mask_width, mask_height, fps?, frame_count?}`. When
+`fps` is given, frames are extracted on the web app's grid (frame *i* is the
+picture shown at (*i* + ½) / fps), so frame indices agree with the app even for
+variable-frame-rate phone video.
 Keyframes may carry a `mask` (RLE at the session's mask size) — used when the
 user refined a frame with the brush and re-tracks from it (`add_new_mask`).
 
