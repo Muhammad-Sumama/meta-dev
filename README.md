@@ -138,7 +138,7 @@ services/
   video/                 safe FFmpeg wrapper, ffprobe, frame streaming, ingest (poster/filmstrip/proxies), uploads
   export/                ExportService, format specs
   jobs/                  JobQueuePort: in-process JobQueue (+ file store), redis/RedisJobQueue (BullMQ), runtime
-  projects/ storage/     repository + path safety
+  projects/ storage/     repository (files | postgres/), import between stores, path safety
 workers/                 job handlers: ingest, segmentation, export; main.ts = worker process
 lib/
   schemas/               zod schemas: command, project, job, API requests
@@ -206,6 +206,9 @@ Nothing is exposed to the browser except non-secret status via `/api/health`.
 | `RUN_WORKERS_IN_WEB` | `false` | Redis backend: also run a worker inside the web process |
 | `JOB_RETENTION_HOURS` | `168` | How long finished jobs stay queryable in Redis |
 | `WORKER_SHUTDOWN_GRACE_MS` | `25000` | Worker: time running jobs get to finish on SIGTERM |
+| `PROJECT_STORE` | `file` | Project/track metadata: `file` (JSON in `DATA_DIR`) or `postgres` |
+| `DATABASE_URL` | – | `postgres://…`, required with `PROJECT_STORE=postgres` |
+| `DATABASE_POOL_SIZE` | `10` | PostgreSQL connections per process |
 | `LLM_PROVIDER` | `mock` | `mock` or `llama` |
 | `LLAMA_BASE_URL` | `http://localhost:11434/v1` | OpenAI-compatible endpoint |
 | `LLAMA_MODEL` | `llama3.1:8b` | Model name at that endpoint |
@@ -240,6 +243,8 @@ Useful scripts:
 | `npm run test:e2e` | Production build + Playwright browser tests |
 | `npm run check` | lint + typecheck + tests + build |
 | `npm run worker` | Job worker process (`JOB_BACKEND=redis`) |
+| `npm run db:migrate` | Create/upgrade the PostgreSQL schema (also automatic on first use) |
+| `npm run db:import-files` | Copy file-store projects into PostgreSQL (re-runnable) |
 | `npm run demo:generate` | Re-render the demo clip and its ground-truth masks |
 | `npm run eval:mock` | Measure mock segmentation/tracking IoU on the demo clip |
 | `npm run demo:hero` | Re-render the landing-page “after” clip through the API |
@@ -271,6 +276,21 @@ npm run build && npm start                     # web server(s)
   failed as interrupted by a janitor.
 - **No worker running:** jobs wait ("Waiting for a worker…"), and Settings →
   Video processing shows which job types have no worker.
+
+### Storing projects in PostgreSQL
+
+```bash
+export PROJECT_STORE=postgres DATABASE_URL=postgres://user:pass@db:5432/opensam
+npm run db:migrate          # optional: the app migrates on first use too
+npm run db:import-files     # optional: bring over projects created with the file store
+```
+
+Projects live in `opensam_projects` (the full project as JSONB) and tracks in
+`opensam_tracks` (masks in their own column, with precomputed summaries so
+listing never loads mask data). Updates are transactions with row locks, so
+any number of web servers and workers can write concurrently. Tables are
+prefixed `opensam_`, so a shared database is fine. Media files stay in
+`DATA_DIR`.
 
 ## Running with mock AI
 
@@ -405,7 +425,7 @@ seams where it will be split:
 | MVP | Production replacement | Seam |
 | --- | --- | --- |
 | In-process `JobQueue` + JSON job files (default) | **Available:** `JOB_BACKEND=redis` — BullMQ on Redis, `npm run worker` processes | `services/jobs/types.ts` (`JobQueuePort`; handlers only see `signal` + `progress`) |
-| `FileSystemProjectRepository` | PostgreSQL (projects, tracks; masks as JSONB or in object storage) | `services/projects/ProjectRepository.ts` |
+| `FileSystemProjectRepository` (default) | **Available:** `PROJECT_STORE=postgres` — projects and tracks in PostgreSQL | `services/projects/ProjectRepository.ts` |
 | Local `data/` media | S3/GCS with signed range URLs, CDN for previews | `services/storage/paths.ts`, media route |
 | Mock / single inference server | Autoscaled GPU pool behind a load balancer, session affinity by video | `services/sam2/SAM2Provider.ts` contract |
 | Job status polling | **Available:** server-sent events per project (works across worker processes via Redis pub/sub), polling fallback | `services/jobs/events.ts`, `hooks/useJobUpdates.ts` |
@@ -418,7 +438,7 @@ at scale it would move to the GPU workers (or FFmpeg filter graphs with
 ## Testing
 
 ```bash
-npm test                 # 181 Vitest tests: unit, components (jsdom), integration
+npm test                 # 203 Vitest tests: unit, components (jsdom), integration
 npm run test:e2e         # Playwright (set PLAYWRIGHT_CHROMIUM_EXECUTABLE to reuse a local Chromium)
 cd inference && pytest   # Python contract tests (no GPU needed)
 ```
@@ -447,6 +467,12 @@ cd inference && pytest   # Python contract tests (no GPU needed)
   inputs on the wire, cleanup on abort/disconnect, cross-process via Redis) and
   the client hook (results applied exactly once, no replay of old jobs after a
   reconnect, fallback to polling, out-of-order updates never regress a job).
+- **Project stores** — one contract suite run against both the file store and
+  a throwaway PostgreSQL cluster: CRUD, validation, 24 concurrent updates from
+  two "processes" with nothing lost, track summaries without mask data,
+  cascading deletes; plus concurrent migrations, unreachable database →
+  friendly error, and file → PostgreSQL import. The multi-process pipeline
+  suite also runs with PostgreSQL as the store.
 - **Job queue on Redis** (skipped if `redis-server` isn't installed) — a
   throwaway Redis per run: cross-process progress/results, cancelling queued
   and running jobs, graceful shutdown (including handlers that ignore the

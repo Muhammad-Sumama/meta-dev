@@ -36,6 +36,11 @@ const EnvSchema = z.object({
   /** How long finished jobs stay queryable (Redis backend). */
   JOB_RETENTION_HOURS: z.coerce.number().int().min(1).max(24 * 90).default(168),
 
+  /** Where project and track metadata live: JSON files in DATA_DIR, or PostgreSQL. */
+  PROJECT_STORE: z.enum(["file", "postgres"]).default("file"),
+  DATABASE_URL: z.string().regex(/^postgres(ql)?:\/\//, "must start with postgres:// or postgresql://").optional(),
+  DATABASE_POOL_SIZE: z.coerce.number().int().min(1).max(100).default(10),
+
   LLM_PROVIDER: z.enum(["mock", "llama"]).default("mock"),
   LLAMA_BASE_URL: z.string().url().default("http://localhost:11434/v1"),
   LLAMA_API_KEY: z.string().optional(),
@@ -68,6 +73,9 @@ export function getConfig(): ServerConfig {
   if (!parsed.success) {
     const issues = parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ");
     throw new Error(`Invalid environment configuration: ${issues}`);
+  }
+  if (parsed.data.PROJECT_STORE === "postgres" && !parsed.data.DATABASE_URL) {
+    throw new Error("Invalid environment configuration: DATABASE_URL is required when PROJECT_STORE=postgres");
   }
   cached = { ...parsed.data, dataDir: path.resolve(parsed.data.DATA_DIR) };
   return cached;

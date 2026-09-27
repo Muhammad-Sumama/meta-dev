@@ -30,6 +30,7 @@ export const ERROR_CODES = [
   "RATE_LIMITED",
   "JOB_CANCELLED",
   "JOB_INTERRUPTED",
+  "STORAGE_UNAVAILABLE",
   "CONFLICT",
   "INTERNAL",
 ] as const;
@@ -165,6 +166,12 @@ export const ERROR_CATALOG: Record<ErrorCode, CatalogEntry> = {
     status: 503,
     message: "This job stopped because the server or worker running it restarted.",
     hint: "Run it again.",
+    retryable: true,
+  },
+  STORAGE_UNAVAILABLE: {
+    status: 503,
+    message: "We couldn't reach the project database or file storage.",
+    hint: "Try again in a moment. If it keeps happening, check that the database/storage service is running.",
     retryable: true,
   },
   CONFLICT: { status: 409, message: "That can't be done in the current state.", retryable: false },

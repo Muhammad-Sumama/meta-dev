@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { CircleCheck, CircleX, RefreshCw, TriangleAlert } from "lucide-react";
 import { api, errorText, type HealthInfo } from "@/lib/client/api";
+import { cn } from "@/lib/utils/cn";
 import type { ParsedCommand } from "@/lib/schemas/command";
 import { useEditor } from "@/stores/editor";
 import { useSystem } from "@/stores/system";
@@ -157,6 +158,10 @@ export function SettingsDialog({ open, onOpenChange }: { open: boolean; onOpenCh
                   Upload limit {health.config.maxUploadMb} MB · max length {Math.round(health.config.maxDurationSeconds / 60)} min · masks computed at {health.config.analysisMaxSize}px
                 </p>
                 <QueueStatus queue={health.queue} />
+                <p className={cn("mt-1 text-[12px]", health.storage.ok ? "text-muted" : "text-danger")}>
+                  Projects stored in {health.storage.backend === "postgres" ? "PostgreSQL" : "JSON files"}
+                  {health.storage.ok ? "" : ` — ${health.storage.message}`}
+                </p>
               </div>
             ) : null}
           </section>

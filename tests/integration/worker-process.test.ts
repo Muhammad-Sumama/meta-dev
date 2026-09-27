@@ -21,13 +21,25 @@ import * as exportsRoute from "@/app/api/projects/[projectId]/exports/route";
 import * as projectRoute from "@/app/api/projects/[projectId]/route";
 import * as trackItemRoute from "@/app/api/projects/[projectId]/tracks/[trackId]/route";
 import { resetJobQueueForTesting, getJobQueue } from "@/services/jobs/runtime";
+import { resetProjectRepositoryForTesting } from "@/services/projects";
 import { DEMO_VIDEO } from "../helpers/evalDemo";
+import { postgresAvailable, startPostgres } from "../helpers/postgres";
 import { redisAvailable, startRedis } from "../helpers/redis";
 import { type Handler, call, upload, waitJob } from "../helpers/routes";
 import { readSse } from "../helpers/sse";
 
-describe.skipIf(!redisAvailable)("separate worker process (JOB_BACKEND=redis)", () => {
+const MODES = [
+  { name: "project store: files", store: "file" as const, available: redisAvailable },
+  { name: "project store: PostgreSQL", store: "postgres" as const, available: redisAvailable && postgresAvailable },
+];
+
+describe.each(MODES)("separate worker process (JOB_BACKEND=redis, $name)", ({ store, available }) => {
+  if (!available) {
+    it.skip("needs redis-server (and PostgreSQL for this mode)", () => {});
+    return;
+  }
   let redis: { url: string; stop(): Promise<void> };
+  let postgres: { url: string; stop(): Promise<void> } | null = null;
   let dataDir: string;
   let worker: ChildProcess;
   let workerLog = "";
@@ -46,6 +58,8 @@ describe.skipIf(!redisAvailable)("separate worker process (JOB_BACKEND=redis)", 
         MIN_FREE_DISK_MB: "0",
         JOB_CONCURRENCY: "2",
         WORKER_SHUTDOWN_GRACE_MS: "300",
+        PROJECT_STORE: store,
+        ...(postgres ? { DATABASE_URL: postgres.url } : {}),
       },
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -68,9 +82,20 @@ describe.skipIf(!redisAvailable)("separate worker process (JOB_BACKEND=redis)", 
 
   beforeAll(async () => {
     redis = await startRedis();
+    if (store === "postgres") postgres = await startPostgres();
     dataDir = mkdtempSync(path.join(os.tmpdir(), "opensam-worker-"));
-    setConfigForTesting({ DATA_DIR: dataDir, MIN_FREE_DISK_MB: 0, JOB_BACKEND: "redis", REDIS_URL: redis.url, JOB_QUEUE_PREFIX: prefix, RUN_WORKERS_IN_WEB: false });
+    setConfigForTesting({
+      DATA_DIR: dataDir,
+      MIN_FREE_DISK_MB: 0,
+      JOB_BACKEND: "redis",
+      REDIS_URL: redis.url,
+      JOB_QUEUE_PREFIX: prefix,
+      RUN_WORKERS_IN_WEB: false,
+      PROJECT_STORE: store,
+      DATABASE_URL: postgres?.url,
+    });
     await resetJobQueueForTesting();
+    await resetProjectRepositoryForTesting();
     const w = startWorker();
     worker = w.proc;
     await w.ready;
@@ -82,14 +107,17 @@ describe.skipIf(!redisAvailable)("separate worker process (JOB_BACKEND=redis)", 
       await once(worker, "exit");
     }
     await resetJobQueueForTesting();
+    await resetProjectRepositoryForTesting();
     setConfigForTesting(null);
     await redis?.stop();
+    await postgres?.stop();
     rmSync(dataDir, { recursive: true, force: true });
   });
 
   it("reports the Redis queue and its workers in health", async () => {
     const { json } = await call(healthRoute.GET as Handler);
     expect(json.queue).toMatchObject({ backend: "redis", workers: { ingest: 1, segment: 1, export: 1 } });
+    expect(json.storage).toMatchObject({ backend: store, ok: true });
     expect(json.ok).toBe(true);
   });
 

@@ -24,7 +24,17 @@ export function summarizeTrack(track: Track): TrackSummary {
 }
 
 export class FileSystemProjectRepository implements ProjectRepository {
+  readonly backend = "file" as const;
   private mutex = new KeyedMutex();
+
+  async health() {
+    try {
+      await ensureDir(projectsDir());
+      return { ok: true, message: `JSON files in ${projectsDir()}` };
+    } catch (err) {
+      return { ok: false, message: `The data directory isn't writable: ${(err as Error).message}` };
+    }
+  }
 
   private projectFile(id: string) {
     return projectPath(id, "project.json");
@@ -145,6 +155,7 @@ export class FileSystemProjectRepository implements ProjectRepository {
 
   async saveTrack(projectId: string, track: Track): Promise<Track> {
     const valid = TrackSchema.parse(track);
+    if (!(await this.get(projectId))) throw new AppError("NOT_FOUND", { message: "This project no longer exists." });
     await this.mutex.run(`${projectId}:${valid.id}`, () => writeJsonAtomic(trackPath(projectId, valid.id), valid));
     return valid;
   }
