@@ -3,7 +3,7 @@ import type { NextConfig } from "next";
 const nextConfig: NextConfig = {
   // FFmpeg/ffprobe binaries are resolved from node_modules at runtime; they must
   // not be bundled.
-  serverExternalPackages: ["ffmpeg-static", "@ffprobe-installer/ffprobe", "yazl"],
+  serverExternalPackages: ["ffmpeg-static", "@ffprobe-installer/ffprobe", "yazl", "bullmq", "ioredis"],
   poweredByHeader: false,
   async headers() {
     return [

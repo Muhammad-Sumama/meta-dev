@@ -29,6 +29,7 @@ export const ERROR_CODES = [
   "INSUFFICIENT_RESOURCES",
   "RATE_LIMITED",
   "JOB_CANCELLED",
+  "JOB_INTERRUPTED",
   "CONFLICT",
   "INTERNAL",
 ] as const;
@@ -160,6 +161,12 @@ export const ERROR_CATALOG: Record<ErrorCode, CatalogEntry> = {
     retryable: true,
   },
   JOB_CANCELLED: { status: 409, message: "This job was cancelled.", retryable: false },
+  JOB_INTERRUPTED: {
+    status: 503,
+    message: "This job stopped because the server or worker running it restarted.",
+    hint: "Run it again.",
+    retryable: true,
+  },
   CONFLICT: { status: 409, message: "That can't be done in the current state.", retryable: false },
   INTERNAL: {
     status: 500,

@@ -21,6 +21,21 @@ const EnvSchema = z.object({
   JOB_CONCURRENCY: z.coerce.number().int().min(1).max(16).default(2),
   MIN_FREE_DISK_MB: z.coerce.number().int().min(0).default(1024),
 
+  /** memory = handlers run inside the web server; redis = BullMQ + `npm run worker` processes. */
+  JOB_BACKEND: z.enum(["memory", "redis"]).default("memory"),
+  REDIS_URL: z.string().regex(/^rediss?:\/\//, "must start with redis:// or rediss://").default("redis://localhost:6379"),
+  /** Namespace for Redis keys and queues (lets several deployments share one Redis). */
+  JOB_QUEUE_PREFIX: z.string().regex(/^[A-Za-z0-9_-]{1,32}$/).default("opensam"),
+  /** Redis backend: also run a worker inside the web process (single-container deployments). */
+  RUN_WORKERS_IN_WEB: bool.default(false),
+  /** Job types a worker process takes, e.g. "segment" on GPU machines and "ingest,export" on CPU ones. */
+  WORKER_JOB_TYPES: z
+    .string()
+    .regex(/^(ingest|segment|export)(,(ingest|segment|export))*$/, "comma-separated list of ingest, segment, export")
+    .default("ingest,segment,export"),
+  /** How long finished jobs stay queryable (Redis backend). */
+  JOB_RETENTION_HOURS: z.coerce.number().int().min(1).max(24 * 90).default(168),
+
   LLM_PROVIDER: z.enum(["mock", "llama"]).default("mock"),
   LLAMA_BASE_URL: z.string().url().default("http://localhost:11434/v1"),
   LLAMA_API_KEY: z.string().optional(),

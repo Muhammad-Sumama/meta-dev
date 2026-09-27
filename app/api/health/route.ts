@@ -16,8 +16,13 @@ export const GET = route(async () => {
     ai.segmentation.health(),
   ]);
   const formats = Object.fromEntries(Object.values(FORMAT_SPECS).map((s) => [s.format, isFormatAvailable(s, ffmpeg)]));
+  const jobs = getJobQueue();
+  const queue = await Promise.race([
+    jobs.stats(),
+    new Promise<never>((_, reject) => setTimeout(() => reject(new Error("timeout")), 3000)),
+  ]).catch(() => ({ backend: jobs.backend, error: "The job queue (Redis) is unreachable, so videos can't be processed." }));
   return json({
-    ok: ffmpeg.available,
+    ok: ffmpeg.available && !("error" in queue),
     ffmpeg: { available: ffmpeg.available, version: ffmpeg.version, encoders: ffmpeg.encoders, source: ffmpeg.source ?? null },
     formats,
     ai: {
@@ -25,6 +30,6 @@ export const GET = route(async () => {
       segmentation: { ...ai.segmentation.info, health: segmentation },
     },
     config: publicConfig(),
-    queue: getJobQueue().stats,
+    queue,
   });
 });

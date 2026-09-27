@@ -98,7 +98,9 @@ so there is nothing else to install. In the demo, try the suggestions:
 │ validation (zod) · rate limits · friendly errors                  │
 │ ProjectService (use-cases)                                        │
 │   ├─ ProjectRepository ── FileSystemProjectRepository (data/)     │
-│   ├─ JobQueue ── queued → processing → completed|failed|cancelled │
+│   ├─ JobQueuePort ── queued → processing → completed|failed|…    │
+│   │    ├─ JobQueue (in-process, default)                          │
+│   │    ├─ RedisJobQueue (BullMQ) ──► `npm run worker` processes   │
 │   │    └─ workers/: ingest · segmentation (“AI worker”) · export  │
 │   ├─ LlamaService ── LanguageProvider                             │
 │   │        ├─ LlamaProvider   (OpenAI-compatible HTTP)            │
@@ -115,6 +117,8 @@ a separate Python service (`inference/`) behind an HTTP contract. Everything
 else — upload, jobs, compositing, export — is TypeScript in one Next.js app,
 which keeps local setup to `npm install`. Long work (tracking, exports,
 transcodes) runs as jobs so the UI never blocks; the browser polls job status.
+Jobs run inside the web server by default, or in separate worker processes on
+other machines with `JOB_BACKEND=redis`.
 
 ### Project layout
 
@@ -131,9 +135,9 @@ services/
   sam2/                  SAM2Service, SAM2Provider (HTTP client), detection targeting
   video/                 safe FFmpeg wrapper, ffprobe, frame streaming, ingest (poster/filmstrip/proxies), uploads
   export/                ExportService, format specs
-  jobs/                  JobQueue (+ file store, runtime singleton)
+  jobs/                  JobQueuePort: in-process JobQueue (+ file store), redis/RedisJobQueue (BullMQ), runtime
   projects/ storage/     repository + path safety
-workers/                 job handlers: ingest, segmentation, export
+workers/                 job handlers: ingest, segmentation, export; main.ts = worker process
 lib/
   schemas/               zod schemas: command, project, job, API requests
   compositing/           pure alpha/effect/clean-plate code shared by preview and export
@@ -191,8 +195,15 @@ Nothing is exposed to the browser except non-secret status via `/api/health`.
 | `MAX_VIDEO_DURATION_SECONDS` | `600` | Longest accepted clip |
 | `MAX_VIDEO_DIMENSION` | `4096` | Largest accepted width/height |
 | `ANALYSIS_MAX_SIZE` | `512` | Mask resolution (max side). 1024 is a good value with SAM 2 |
-| `JOB_CONCURRENCY` | `2` | Parallel background jobs |
+| `JOB_CONCURRENCY` | `2` | Parallel background jobs (per process, per job type with Redis) |
 | `MIN_FREE_DISK_MB` | `1024` | Refuse work when disk is nearly full |
+| `JOB_BACKEND` | `memory` | `memory` (jobs run inside the web server) or `redis` (BullMQ + `npm run worker` processes) |
+| `REDIS_URL` | `redis://localhost:6379` | Redis for `JOB_BACKEND=redis` (`rediss://` for TLS) |
+| `JOB_QUEUE_PREFIX` | `opensam` | Namespace for keys/queues, so deployments can share a Redis |
+| `WORKER_JOB_TYPES` | `ingest,segment,export` | Job types a worker process takes (e.g. `segment` on GPU hosts) |
+| `RUN_WORKERS_IN_WEB` | `false` | Redis backend: also run a worker inside the web process |
+| `JOB_RETENTION_HOURS` | `168` | How long finished jobs stay queryable in Redis |
+| `WORKER_SHUTDOWN_GRACE_MS` | `25000` | Worker: time running jobs get to finish on SIGTERM |
 | `LLM_PROVIDER` | `mock` | `mock` or `llama` |
 | `LLAMA_BASE_URL` | `http://localhost:11434/v1` | OpenAI-compatible endpoint |
 | `LLAMA_MODEL` | `llama3.1:8b` | Model name at that endpoint |
@@ -213,8 +224,10 @@ npm run dev            # development, http://localhost:3000
 npm run build && npm start   # production build
 ```
 
-The job queue runs inside the Next.js server process, so use a long-running
-server (`next dev` / `next start`, Docker, a VM) — not serverless functions.
+By default the job queue runs inside the Next.js server process, so use a
+long-running server (`next dev` / `next start`, Docker, a VM) — not serverless
+functions. To run jobs in separate processes, see
+[Running workers with Redis](#running-workers-with-redis).
 
 Useful scripts:
 
@@ -224,9 +237,38 @@ Useful scripts:
 | `npm test` | All Vitest suites (unit, components, integration) |
 | `npm run test:e2e` | Production build + Playwright browser tests |
 | `npm run check` | lint + typecheck + tests + build |
+| `npm run worker` | Job worker process (`JOB_BACKEND=redis`) |
 | `npm run demo:generate` | Re-render the demo clip and its ground-truth masks |
 | `npm run eval:mock` | Measure mock segmentation/tracking IoU on the demo clip |
 | `npm run demo:hero` | Re-render the landing-page “after” clip through the API |
+
+### Running workers with Redis
+
+With `JOB_BACKEND=redis` the web server only enqueues jobs; worker processes
+— on the same machine or others — run ingest, tracking and export. Progress,
+results and cancellation travel through Redis, so the UI behaves exactly as in
+the single-process setup.
+
+```bash
+redis-server                                   # or any Redis 6.2+
+export JOB_BACKEND=redis REDIS_URL=redis://localhost:6379
+npm run worker                                 # one or more, anywhere that can reach Redis and DATA_DIR
+npm run build && npm start                     # web server(s)
+```
+
+- **Scaling:** start more workers; each takes `JOB_CONCURRENCY` jobs per type.
+  Split by hardware with `WORKER_JOB_TYPES=segment` (GPU hosts) and
+  `WORKER_JOB_TYPES=ingest,export` (CPU hosts).
+- **Shared storage:** web and workers must see the same `DATA_DIR` (a shared
+  volume). Project updates take a lock file, so concurrent writers are safe.
+- **Shutdown:** SIGTERM stops taking jobs, gives running ones
+  `WORKER_SHUTDOWN_GRACE_MS` to finish, and records the rest as *interrupted*
+  (the user sees "run it again").
+- **Crashes:** if a worker dies without shutting down, another worker re-runs
+  its job once BullMQ's lock expires (60 s); jobs nobody will finish are
+  failed as interrupted by a janitor.
+- **No worker running:** jobs wait ("Waiting for a worker…"), and Settings →
+  Video processing shows which job types have no worker.
 
 ## Running with mock AI
 
@@ -360,7 +402,7 @@ seams where it will be split:
 
 | MVP | Production replacement | Seam |
 | --- | --- | --- |
-| In-process `JobQueue` + JSON job files | BullMQ/Redis or a cloud queue; workers as separate processes/containers | `services/jobs/JobQueue.ts` (`JobHandler` only sees `signal` + `progress`) |
+| In-process `JobQueue` + JSON job files (default) | **Available:** `JOB_BACKEND=redis` — BullMQ on Redis, `npm run worker` processes | `services/jobs/types.ts` (`JobQueuePort`; handlers only see `signal` + `progress`) |
 | `FileSystemProjectRepository` | PostgreSQL (projects, tracks; masks as JSONB or in object storage) | `services/projects/ProjectRepository.ts` |
 | Local `data/` media | S3/GCS with signed range URLs, CDN for previews | `services/storage/paths.ts`, media route |
 | Mock / single inference server | Autoscaled GPU pool behind a load balancer, session affinity by video | `services/sam2/SAM2Provider.ts` contract |
@@ -374,7 +416,7 @@ at scale it would move to the GPU workers (or FFmpeg filter graphs with
 ## Testing
 
 ```bash
-npm test                 # 155 Vitest tests: unit, components (jsdom), integration
+npm test                 # 171 Vitest tests: unit, components (jsdom), integration
 npm run test:e2e         # Playwright (set PLAYWRIGHT_CHROMIUM_EXECUTABLE to reuse a local Chromium)
 cd inference && pytest   # Python contract tests (no GPU needed)
 ```
@@ -399,6 +441,12 @@ cd inference && pytest   # Python contract tests (no GPU needed)
   the H.264 and VP9 preview proxies show exactly the frame masks were computed
   on, portrait video is analysed upright, box → track matches ground truth,
   and exports keep display orientation, every frame and the audio.
+- **Job queue on Redis** (skipped if `redis-server` isn't installed) — a
+  throwaway Redis per run: cross-process progress/results, cancelling queued
+  and running jobs, graceful shutdown (including handlers that ignore the
+  abort), crash recovery via BullMQ stall detection, the orphan janitor, and
+  the full upload → AI command → export pipeline with a real `workers/main.ts`
+  process, then SIGTERM and a replacement worker.
 - **Python** — the inference server's HTTP contract with a fake backend, plus
   SAM 2 frame extraction on the web app's frame grid.
 - **E2E** — landing page → Try Demo → AI command → effect → shortcuts/undo →

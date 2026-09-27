@@ -1,6 +1,6 @@
 import "server-only";
 import { runExport, type ExportJobInput, type ExportResult } from "@/services/export/ExportService";
-import type { JobHandler } from "@/services/jobs/JobQueue";
+import type { JobHandler } from "@/services/jobs/types";
 import { requireProject } from "@/services/projects";
 
 export const exportWorker: JobHandler<ExportJobInput, ExportResult> = async ({ job, signal, progress }) => {

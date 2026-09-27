@@ -38,8 +38,7 @@ async function recordJob(projectId: string, jobId: string) {
 }
 
 function enqueueIngest(project: Project) {
-  const job = getJobQueue().enqueue({ type: "ingest", projectId: project.id, label: "Preparing video", input: { projectId: project.id } });
-  return job;
+  return getJobQueue().enqueue({ type: "ingest", projectId: project.id, label: "Preparing video", input: { projectId: project.id } });
 }
 
 export async function createProjectFromUpload(request: Request): Promise<{ project: Project; job: Job }> {
@@ -58,7 +57,7 @@ export async function createProjectFromUpload(request: Request): Promise<{ proje
     signal: request.signal,
   });
   const project = await createProjectFromFile({ path: received.tmpPath, size: received.size, container: received.container, originalName });
-  const job = enqueueIngest(project);
+  const job = await enqueueIngest(project);
   await recordJob(project.id, job.id);
   return { project, job };
 }
@@ -96,7 +95,7 @@ export async function createDemoProject(): Promise<{ project: Project; job: Job 
   } catch {
     /* optional asset; generated on demand instead */
   }
-  const job = enqueueIngest(finalProject);
+  const job = await enqueueIngest(finalProject);
   await recordJob(project.id, job.id);
   return { project: finalProject, job };
 }
@@ -116,7 +115,7 @@ export async function requestVp9Proxy(projectId: string): Promise<{ project: Pro
   const updated = await getProjectRepository().update(projectId, (p) => {
     p.media.vp9Proxy = { status: "pending" };
   });
-  const job = queue.enqueue({ type: "ingest", projectId, label: "Preparing browser preview", input: { projectId, task: "vp9_proxy" } });
+  const job = await queue.enqueue({ type: "ingest", projectId, label: "Preparing browser preview", input: { projectId, task: "vp9_proxy" } });
   await recordJob(projectId, job.id);
   return { project: updated, job };
 }
@@ -210,7 +209,7 @@ export async function runCommand(projectId: string, req: CommandRequest, signal?
       endFrame,
       effect: parsed.command.effect,
     };
-    job = getJobQueue().enqueue({
+    job = await getJobQueue().enqueue({
       type: "segment",
       projectId,
       label: req.text.slice(0, 80),
@@ -275,7 +274,7 @@ export async function startTracking(projectId: string, req: TrackRequest): Promi
     direction: req.direction,
     preserveOutside: req.preserveOutside,
   };
-  const job = getJobQueue().enqueue({
+  const job = await getJobQueue().enqueue({
     type: "segment",
     projectId,
     label: req.name ? `Tracking ${req.name}` : "Tracking object",
@@ -320,7 +319,7 @@ export async function startExport(projectId: string, req: ExportRequest): Promis
   const exportId = newId("exp");
   const input: ExportJobInput = { exportId, settings: req.settings, composite };
   const spec = FORMAT_SPECS[req.settings.format];
-  const job = getJobQueue().enqueue({ type: "export", projectId, label: `Export ${spec.label}`, input });
+  const job = await getJobQueue().enqueue({ type: "export", projectId, label: `Export ${spec.label}`, input });
   await repo.update(projectId, (p) => {
     p.exportSettings = req.settings;
     p.composite = composite;

@@ -6,7 +6,7 @@ import { TRACK_COLORS, type PointPrompt, type BoxPrompt, type Track } from "@/li
 import { newId } from "@/lib/utils/ids";
 import { getAIServices } from "@/services/ai/registry";
 import type { TrackKeyframe } from "@/services/ai/types";
-import type { JobHandler } from "@/services/jobs/JobQueue";
+import type { JobHandler } from "@/services/jobs/types";
 import { getProjectRepository, requireProject } from "@/services/projects";
 
 /**

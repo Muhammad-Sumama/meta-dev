@@ -13,7 +13,7 @@ import {
   type TrackSummary,
 } from "@/lib/schemas/project";
 import { projectDir, projectPath, projectsDir, trackPath } from "../storage/paths";
-import { ensureDir, KeyedMutex, readJson, writeJsonAtomic } from "../storage/fs";
+import { ensureDir, KeyedMutex, readJson, withFileLock, writeJsonAtomic } from "../storage/fs";
 import type { ProjectRepository } from "./ProjectRepository";
 
 export function summarizeTrack(track: Track): TrackSummary {
@@ -53,16 +53,24 @@ export class FileSystemProjectRepository implements ProjectRepository {
   }
 
   async update(projectId: string, mutator: (project: Project) => Project | void): Promise<Project> {
-    return this.mutex.run(projectId, async () => {
-      const current = await this.get(projectId);
-      if (!current) throw new AppError("NOT_FOUND", { message: "This project no longer exists." });
-      const draft = structuredClone(current);
-      const next = mutator(draft) ?? draft;
-      next.updatedAt = new Date().toISOString();
-      const valid = ProjectSchema.parse(next);
-      await writeJsonAtomic(this.projectFile(projectId), valid);
-      return valid;
-    });
+    if (!(await this.get(projectId))) throw new AppError("NOT_FOUND", { message: "This project no longer exists." });
+    // In-process queueing first, then the lock file for other processes (workers, replicas).
+    return this.mutex.run(projectId, () =>
+      withFileLock(projectPath(projectId, "project.lock"), async () => {
+        const current = await this.get(projectId);
+        if (!current) throw new AppError("NOT_FOUND", { message: "This project no longer exists." });
+        const draft = structuredClone(current);
+        const next = mutator(draft) ?? draft;
+        next.updatedAt = new Date().toISOString();
+        const valid = ProjectSchema.parse(next);
+        await writeJsonAtomic(this.projectFile(projectId), valid);
+        return valid;
+      }).catch((err) => {
+        // Deleted between the check and taking the lock.
+        if ((err as NodeJS.ErrnoException).code === "ENOENT") throw new AppError("NOT_FOUND", { message: "This project no longer exists." });
+        throw err;
+      }),
+    );
   }
 
   async list(): Promise<ProjectListItem[]> {

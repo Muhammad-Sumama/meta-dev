@@ -1,5 +1,5 @@
 import "server-only";
-import type { JobHandler } from "@/services/jobs/JobQueue";
+import type { JobHandler } from "@/services/jobs/types";
 import { getProjectRepository, requireProject } from "@/services/projects";
 import { mediaPath } from "@/services/storage/paths";
 import { generateFilmstrip, generatePoster, generateProxy, generateVp9Proxy } from "@/services/video/ingest";

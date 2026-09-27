@@ -20,7 +20,7 @@ describe("JobQueue", () => {
       progress({ current: 2, total: 2 });
       return { ok: true };
     });
-    const job = q.enqueue({ type: "export", projectId: "prj_aaaaaaaaaaaa", label: "t", input: {} });
+    const job = q.enqueueSync({ type: "export", projectId: "prj_aaaaaaaaaaaa", label: "t", input: {} });
     expect(job.status).toBe("queued");
     const done = await q.waitFor(job.id);
     expect(done.status).toBe("completed");
@@ -39,10 +39,10 @@ describe("JobQueue", () => {
     q.register("export", async () => {
       throw new Error("TypeError: cannot read property 'x' of undefined at /secret/path.ts:12");
     });
-    const a = await q.waitFor(q.enqueue({ type: "segment", projectId: "p", label: "", input: {} }).id);
+    const a = await q.waitFor(q.enqueueSync({ type: "segment", projectId: "p", label: "", input: {} }).id);
     expect(a.status).toBe("failed");
     expect(a.error).toMatchObject({ code: "TARGET_NOT_FOUND", message: "We couldn't find “unicorn” in this video." });
-    const b = await q.waitFor(q.enqueue({ type: "export", projectId: "p", label: "", input: {} }).id);
+    const b = await q.waitFor(q.enqueueSync({ type: "export", projectId: "p", label: "", input: {} }).id);
     expect(b.error?.code).toBe("INTERNAL");
     expect(b.error?.message).not.toMatch(/secret|TypeError/);
   });
@@ -52,8 +52,8 @@ describe("JobQueue", () => {
     q.register("export", async ({ signal }) => {
       await new Promise((_, reject) => signal.addEventListener("abort", () => reject(Object.assign(new Error("x"), { name: "AbortError" }))));
     });
-    const running = q.enqueue({ type: "export", projectId: "p", label: "", input: {} });
-    const queued = q.enqueue({ type: "export", projectId: "p", label: "", input: {} });
+    const running = q.enqueueSync({ type: "export", projectId: "p", label: "", input: {} });
+    const queued = q.enqueueSync({ type: "export", projectId: "p", label: "", input: {} });
     await tick();
     expect((await q.get(running.id))?.status).toBe("processing");
     expect((await q.cancel(queued.id)).status).toBe("cancelled");
@@ -73,7 +73,7 @@ describe("JobQueue", () => {
       await tick(20);
       active--;
     });
-    const ids = Array.from({ length: 5 }, () => q.enqueue({ type: "export", projectId: "p", label: "", input: {} }).id);
+    const ids = Array.from({ length: 5 }, () => q.enqueueSync({ type: "export", projectId: "p", label: "", input: {} }).id);
     await Promise.all(ids.map((id) => q.waitFor(id)));
     expect(peak).toBe(2);
   });
@@ -99,7 +99,7 @@ describe("JobQueue", () => {
 
   it("rejects unknown job types and invalid transitions", () => {
     const q = queue();
-    expect(() => q.enqueue({ type: "clean_plate", projectId: "p", label: "", input: {} })).toThrow();
+    expect(() => q.enqueueSync({ type: "clean_plate", projectId: "p", label: "", input: {} })).toThrow();
     expect(new InvalidTransitionError("completed", "processing").message).toMatch(/completed → processing/);
   });
 });

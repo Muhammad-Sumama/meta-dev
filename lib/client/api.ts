@@ -70,7 +70,9 @@ export interface HealthInfo {
     segmentation: { id: string; name: string; kind: "mock" | "production"; description: string; health: { status: string; message: string } };
   };
   config: { maxUploadMb: number; maxDurationSeconds: number; analysisMaxSize: number; llmProvider: string; llamaModel: string | null; segmentationProvider: string };
-  queue: { running: number; queued: number; concurrency: number };
+  queue:
+    | { backend: "memory" | "redis"; running: number; queued: number; concurrency: number; workers?: Record<string, number> }
+    | { backend: "memory" | "redis"; error: string };
 }
 
 export interface ProjectBundle {
