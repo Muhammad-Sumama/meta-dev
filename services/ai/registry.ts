@@ -44,7 +44,7 @@ export function getAIServices(): AIServices {
   const segmentation =
     cfg.SEGMENTATION_PROVIDER === "sam2"
       ? new SAM2Provider({
-          baseUrl: cfg.SAM2_SERVICE_URL,
+          baseUrl: cfg.SAM2_SERVICE_URL.split(",").map((u) => u.trim()),
           apiKey: cfg.SAM2_API_KEY,
           timeoutMs: cfg.SAM2_TIMEOUT_MS,
           sharedStorage: cfg.SAM2_SHARED_STORAGE,

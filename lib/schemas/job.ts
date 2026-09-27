@@ -19,6 +19,9 @@ export function isTerminal(status: JobStatus): boolean {
   return JOB_TRANSITIONS[status].length === 0;
 }
 
+/** Order of statuses along a job's life (terminal states share the last rank). */
+export const JOB_STAGE_RANK: Record<JobStatus, number> = { queued: 0, processing: 1, completed: 2, failed: 2, cancelled: 2 };
+
 export const JobProgressSchema = z.object({
   stage: z.string(),
   message: z.string(),

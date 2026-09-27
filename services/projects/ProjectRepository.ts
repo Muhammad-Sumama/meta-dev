@@ -1,13 +1,19 @@
 import type { Project, ProjectListItem, Track, TrackSummary } from "@/lib/schemas/project";
 
 /**
- * Persistence boundary for projects and tracks.
+ * Persistence boundary for projects and tracks (metadata and masks; media
+ * files live in DATA_DIR either way).
  *
- * The MVP ships a filesystem implementation. A production deployment would
- * implement this interface on PostgreSQL (project + track metadata, JSONB for
- * masks or object storage for large mask payloads) without touching callers.
+ *   - FileSystemProjectRepository: JSON files in DATA_DIR (default).
+ *   - PostgresProjectRepository: PROJECT_STORE=postgres.
+ *
+ * Both are safe with several processes (web replicas, workers) writing.
  */
 export interface ProjectRepository {
+  readonly backend: "file" | "postgres";
+  /** Cheap reachability check for /api/health. */
+  health(): Promise<{ ok: boolean; message: string }>;
+
   create(project: Project): Promise<Project>;
   get(projectId: string): Promise<Project | null>;
   /** Atomic read-modify-write; the mutator may return a new object or mutate in place. */

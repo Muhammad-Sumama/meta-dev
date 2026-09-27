@@ -3,6 +3,7 @@
 import { toast } from "sonner";
 import { applyStrokeToCounts, type Pt } from "@/lib/mask/edit";
 import { isEmptyMask } from "@/lib/mask/rle";
+import { isTerminal } from "@/lib/schemas/job";
 import type { BoxPrompt, PointPrompt, Track } from "@/lib/schemas/project";
 import { TRACK_COLORS } from "@/lib/schemas/project";
 import { newId } from "@/lib/utils/ids";
@@ -229,7 +230,21 @@ export async function submitCommand(text: string, onPlan?: (preset: "mask" | "vi
     const res = await api.command(project.id, { text, frameIndex: s.currentFrame, selectedTrackId: selected });
     const st = useEditor.getState();
     st.addCommand(res.record);
-    if (res.job) st.upsertJob(res.job);
+    if (res.job) {
+      st.upsertJob(res.job);
+      // Live updates can deliver the result before this response: sync the command record with it.
+      const known = useEditor.getState().jobs[res.job.id];
+      if (known && isTerminal(known.status)) {
+        st.updateCommand(
+          res.record.id,
+          known.status === "completed"
+            ? { status: "completed", trackId: (known.result as { trackId?: string } | undefined)?.trackId }
+            : known.status === "failed"
+              ? { status: "failed", error: known.error }
+              : { status: "cancelled" },
+        );
+      }
+    }
     for (const w of res.parsed.warnings) toast.warning(w);
     if (!res.job) {
       const effect = res.plan.steps.find((p) => p.kind === "apply_effect");

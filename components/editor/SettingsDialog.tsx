@@ -2,7 +2,8 @@
 
 import { useEffect, useState } from "react";
 import { CircleCheck, CircleX, RefreshCw, TriangleAlert } from "lucide-react";
-import { api, errorText } from "@/lib/client/api";
+import { api, errorText, type HealthInfo } from "@/lib/client/api";
+import { cn } from "@/lib/utils/cn";
 import type { ParsedCommand } from "@/lib/schemas/command";
 import { useEditor } from "@/stores/editor";
 import { useSystem } from "@/stores/system";
@@ -16,6 +17,35 @@ function StatusIcon({ status }: { status: string }) {
   if (status === "ready") return <CircleCheck className="size-4 text-success" />;
   if (status === "degraded") return <TriangleAlert className="size-4 text-warning" />;
   return <CircleX className="size-4 text-danger" />;
+}
+
+function QueueStatus({ queue }: { queue: HealthInfo["queue"] }) {
+  if ("error" in queue) {
+    return (
+      <p className="mt-2 flex items-start gap-1.5 text-[12px] text-danger">
+        <StatusIcon status="unavailable" /> {queue.error}
+      </p>
+    );
+  }
+  const idle = Object.entries(queue.workers ?? {}).filter(([, n]) => n === 0).map(([type]) => type);
+  return (
+    <div className="mt-1.5 text-[12px] text-muted">
+      <p>
+        {queue.backend === "redis" ? "Redis job queue" : "In-process jobs"} · {queue.running} running / {queue.queued} queued
+        {queue.workers
+          ? ` · workers: ${Object.entries(queue.workers)
+              .map(([type, n]) => `${type} ${n}`)
+              .join(", ")}`
+          : ` (concurrency ${queue.concurrency})`}
+      </p>
+      {idle.length > 0 && (
+        <p className="mt-1 flex items-start gap-1.5 text-warning">
+          <TriangleAlert className="mt-px size-3.5 shrink-0" />
+          No worker is taking {idle.join(", ")} jobs — they will wait until one starts (npm run worker).
+        </p>
+      )}
+    </div>
+  );
 }
 
 export function SettingsDialog({ open, onOpenChange }: { open: boolean; onOpenChange(open: boolean): void }) {
@@ -125,7 +155,14 @@ export function SettingsDialog({ open, onOpenChange }: { open: boolean; onOpenCh
                   ))}
                 </div>
                 <p className="mt-2 text-[12px] text-muted">
-                  Upload limit {health.config.maxUploadMb} MB · max length {Math.round(health.config.maxDurationSeconds / 60)} min · masks computed at {health.config.analysisMaxSize}px · {health.queue.running} running / {health.queue.queued} queued jobs (concurrency {health.queue.concurrency})
+                  Upload limit {health.config.maxUploadMb} MB · max length {Math.round(health.config.maxDurationSeconds / 60)} min · masks computed at {health.config.analysisMaxSize}px
+                </p>
+                <QueueStatus queue={health.queue} />
+                <p className={cn("mt-1 text-[12px]", health.storage.ok && health.media.ok ? "text-muted" : "text-danger")}>
+                  Projects stored in {health.storage.backend === "postgres" ? "PostgreSQL" : "JSON files"} · media in{" "}
+                  {health.media.backend === "s3" ? "object storage (S3)" : "the local data folder"}
+                  {health.storage.ok ? "" : ` — ${health.storage.message}`}
+                  {health.media.ok ? "" : ` — ${health.media.message}`}
                 </p>
               </div>
             ) : null}

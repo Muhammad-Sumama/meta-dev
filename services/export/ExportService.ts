@@ -6,13 +6,15 @@ import yazl from "yazl";
 import { buildAlpha } from "@/lib/compositing/alpha";
 import { computeCleanPlate, type PlateSample } from "@/lib/compositing/cleanPlate";
 import { applyEffect } from "@/lib/compositing/effects";
+import { refineAlpha, refineRadiusFor } from "@/lib/compositing/refine";
 import { AppError } from "@/lib/errors";
 import { decodeMask, maskForFrame } from "@/lib/mask/rle";
 import type { JobProgress } from "@/lib/schemas/job";
 import type { Composite, ExportSettings, Project, Track } from "@/lib/schemas/project";
 import { getProjectRepository } from "../projects";
 import { assertDiskSpace, ensureDir, writeFileAtomic } from "../storage/fs";
-import { exportsDir, mediaPath } from "../storage/paths";
+import { exportsDir } from "../storage/paths";
+import { ensureLocal, publish } from "../storage/projectMedia";
 import { getFFmpegCapabilities, killProcess, mapFFmpegError, spawnFFmpeg } from "../video/ffmpeg";
 import { readFrameAt, readFrames } from "../video/frames";
 import { audioArgs, encoderArgs, FORMAT_SPECS, FORMATS_BY_KIND, isFormatAvailable, outputDimensions } from "./formats";
@@ -88,6 +90,7 @@ export async function runExport(project: Project, input: ExportJobInput, ctx: Ct
     const tracks = (await Promise.all((await repo.listTracks(project.id)).map((t) => repo.getTrack(project.id, t.id)))).filter(Boolean);
     const payload = { format: "opensam-project", formatVersion: 1, exportedAt: new Date().toISOString(), project, tracks };
     await writeFileAtomic(outPath, JSON.stringify(payload, null, 2));
+    await publish(project.id, `exports/${fileName}`, spec.mime);
     const st = await fs.stat(/*turbopackIgnore: true*/ outPath);
     return { exportId, fileName, downloadName, sizeBytes: st.size, format: spec.format, mime: spec.mime, frames: 0, width: 0, height: 0, fps: 0, warnings };
   }
@@ -117,7 +120,7 @@ export async function runExport(project: Project, input: ExportJobInput, ctx: Ct
   const srcCount = end - start + 1;
   const outCount = fpsChange ? Math.max(1, Math.floor((srcCount * outFps) / srcFps)) : srcCount;
   const srcIndexFor = (j: number) => Math.min(end, start + (fpsChange ? Math.round((j * srcFps) / outFps) : j));
-  const sourcePath = mediaPath(project.id, project.video.fileName);
+  const sourcePath = await ensureLocal(project.id, `media/${project.video.fileName}`);
 
   const bytesPerFrame = W * H * (spec.matte ? 1 : 4);
   await assertDiskSpace(dir, Math.ceil((spec.sequence ? bytesPerFrame * outCount * 0.6 : bytesPerFrame * outCount * 0.05) / 1024 / 1024));
@@ -204,6 +207,11 @@ export async function runExport(project: Project, input: ExportJobInput, ctx: Ct
     keepAlpha: spec.alpha,
   };
 
+  // Edge refinement uses each frame as the guide, so it happens once the frame is decoded.
+  const refine = composite.refineEdges && tracks.length > 0;
+  const refineRadius = refineRadiusFor(mh, H, (composite.feather * H) / project.video.height);
+  const finalAlpha = (srcIdx: number, rgba: Uint8Array) => (refine ? refineAlpha(alphaFor(srcIdx), rgba, W, H, { radius: refineRadius }) : alphaFor(srcIdx));
+
   const report = (j: number) =>
     ctx.progress({
       stage: "rendering",
@@ -214,7 +222,7 @@ export async function runExport(project: Project, input: ExportJobInput, ctx: Ct
     });
 
   try {
-    if (spec.matte) {
+    if (spec.matte && !refine) {
       for (let j = 0; j < outCount; j++) {
         abortIfNeeded(ctx.signal);
         await write(alphaFor(srcIndexFor(j)));
@@ -235,8 +243,11 @@ export async function runExport(project: Project, input: ExportJobInput, ctx: Ct
       })) {
         if (j >= outCount) break;
         const rgba = new Uint8Array(frame.data.buffer, frame.data.byteOffset, frame.data.byteLength);
-        if (tracks.length) applyEffect(rgba, alphaFor(srcIndexFor(j)), W, H, effectParams);
-        await write(rgba);
+        if (spec.matte) await write(finalAlpha(srcIndexFor(j), rgba));
+        else {
+          if (tracks.length) applyEffect(rgba, finalAlpha(srcIndexFor(j), rgba), W, H, effectParams);
+          await write(rgba);
+        }
         report(j);
         j++;
         if (j % 4 === 0) await new Promise<void>((r) => setImmediate(r));
@@ -271,6 +282,7 @@ export async function runExport(project: Project, input: ExportJobInput, ctx: Ct
     if (seqDir) await fs.rm(seqDir, { recursive: true, force: true });
   }
 
+  await publish(project.id, `exports/${fileName}`, spec.mime);
   const st = await fs.stat(/*turbopackIgnore: true*/ outPath);
   return { exportId, fileName, downloadName, sizeBytes: st.size, format: spec.format, mime: spec.mime, frames: outCount, width: W, height: H, fps: outFps, warnings };
 }

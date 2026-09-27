@@ -1,39 +1,34 @@
-import { AppError, toAppError } from "@/lib/errors";
+import { AppError, ERROR_CATALOG, toAppError } from "@/lib/errors";
 import { newId } from "@/lib/utils/ids";
 import {
   isTerminal,
   JOB_TRANSITIONS,
   type Job,
-  type JobProgress,
   type JobStatus,
   type JobType,
 } from "@/lib/schemas/job";
+import {
+  MAX_ACTIVE_JOBS,
+  type EnqueueOptions,
+  type JobContext,
+  type JobHandler,
+  type JobQueuePort,
+  type JobStore,
+  type QueueStats,
+} from "./types";
 
 /**
- * Asynchronous job queue.
+ * In-process job queue (the default backend).
  *
  *   API route → enqueue() → [queued] → worker handler → [processing] → [completed|failed|cancelled]
  *
- * The MVP runs handlers in the Next.js server process with bounded
- * concurrency. Handlers are written against `JobContext` only (abort signal +
- * progress reporting), so the same code can run in a separate worker process
- * (e.g. BullMQ/Redis + GPU workers) by swapping this class for a remote queue
- * implementing the same surface.
+ * Handlers run in the Next.js server process with bounded concurrency; job
+ * state is persisted through a `JobStore` (JSON files). For multi-process or
+ * multi-machine deployments use `RedisJobQueue` (JOB_BACKEND=redis), which
+ * implements the same `JobQueuePort`.
  */
 
-export interface JobContext<TInput = unknown> {
-  job: Readonly<Job<TInput>>;
-  signal: AbortSignal;
-  progress(update: Partial<JobProgress>): void;
-}
-
-export type JobHandler<TInput = unknown, TResult = unknown> = (ctx: JobContext<TInput>) => Promise<TResult>;
-
-export interface JobStore {
-  save(job: Job): Promise<void>;
-  load(jobId: string): Promise<Job | null>;
-  loadAll(): Promise<Job[]>;
-}
+export type { EnqueueOptions, JobContext, JobHandler, JobStore } from "./types";
 
 export class MemoryJobStore implements JobStore {
   private jobs = new Map<string, Job>();
@@ -49,15 +44,6 @@ export class MemoryJobStore implements JobStore {
   }
 }
 
-export interface EnqueueOptions<TInput> {
-  type: JobType;
-  projectId: string;
-  label: string;
-  input: TInput;
-  trackId?: string;
-  frameRange?: { start: number; end: number };
-}
-
 export class InvalidTransitionError extends Error {
   constructor(from: JobStatus, to: JobStatus) {
     super(`Invalid job transition ${from} → ${to}`);
@@ -67,7 +53,8 @@ export class InvalidTransitionError extends Error {
 
 type Listener = (job: Job) => void;
 
-export class JobQueue {
+export class JobQueue implements JobQueuePort {
+  readonly backend = "memory" as const;
   private handlers = new Map<JobType, JobHandler>();
   private jobs = new Map<string, Job>();
   private waiting: string[] = [];
@@ -105,12 +92,8 @@ export class JobQueue {
         if (!isTerminal(job.status)) {
           job.status = "failed";
           job.finishedAt = new Date().toISOString();
-          job.error = {
-            code: "INTERNAL",
-            message: "This job was interrupted because the server restarted.",
-            hint: "Run it again.",
-            retryable: true,
-          };
+          const { message, hint, retryable } = ERROR_CATALOG.JOB_INTERRUPTED;
+          job.error = { code: "JOB_INTERRUPTED", message, hint, retryable };
           await this.store.save(job);
         }
       }
@@ -119,10 +102,15 @@ export class JobQueue {
     }
   }
 
-  enqueue<TInput>(opts: EnqueueOptions<TInput>): Job<TInput> {
+  async enqueue<TInput>(opts: EnqueueOptions<TInput>): Promise<Job<TInput>> {
+    return this.enqueueSync(opts);
+  }
+
+  /** Synchronous enqueue (in-process only). */
+  enqueueSync<TInput>(opts: EnqueueOptions<TInput>): Job<TInput> {
     if (!this.handlers.has(opts.type)) throw new Error(`No handler registered for job type "${opts.type}"`);
     const active = [...this.jobs.values()].filter((j) => !isTerminal(j.status)).length;
-    if (active >= 50) {
+    if (active >= MAX_ACTIVE_JOBS) {
       throw new AppError("INSUFFICIENT_RESOURCES", {
         message: "Too many jobs are running right now.",
         hint: "Wait for some to finish, then try again.",
@@ -301,7 +289,7 @@ export class JobQueue {
     }
   }
 
-  get stats() {
-    return { running: this.running.size, queued: this.waiting.length, concurrency: this.concurrency };
+  async stats(): Promise<QueueStats> {
+    return { backend: "memory", running: this.running.size, queued: this.waiting.length, concurrency: this.concurrency };
   }
 }

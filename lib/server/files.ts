@@ -3,32 +3,31 @@ import { createReadStream, promises as fs } from "node:fs";
 import { Readable } from "node:stream";
 import { AppError } from "@/lib/errors";
 
-/**
- * Streams a file with HTTP Range support so the browser's <video> element can
- * seek without downloading the whole file.
- */
-export async function serveFile(
-  request: Request,
-  filePath: string,
-  opts: { contentType: string; downloadName?: string; cacheSeconds?: number },
-): Promise<Response> {
-  let size: number;
-  let mtime: Date;
-  try {
-    const st = await fs.stat(filePath);
-    if (!st.isFile()) throw new Error("not a file");
-    size = st.size;
-    mtime = st.mtime;
-  } catch {
-    throw new AppError("NOT_FOUND", { message: "That file isn't available (it may still be processing)." });
-  }
+export interface ServeOptions {
+  contentType: string;
+  downloadName?: string;
+  cacheSeconds?: number;
+}
 
-  const etag = `"${size.toString(16)}-${mtime.getTime().toString(16)}"`;
+/** Something servable with byte ranges: a local file or a stored object. */
+export interface RangeSource {
+  size: number;
+  etag: string;
+  lastModified: Date;
+  open(range?: { start: number; end: number }): Promise<ReadableStream<Uint8Array>>;
+}
+
+/**
+ * Builds the response for GET/HEAD with HTTP Range support, so the browser's
+ * <video> element can seek without downloading the whole file.
+ */
+export async function rangeResponse(request: Request, src: RangeSource, opts: ServeOptions): Promise<Response> {
+  const { size, etag } = src;
   const headers: Record<string, string> = {
     "content-type": opts.contentType,
     "accept-ranges": "bytes",
     etag,
-    "last-modified": mtime.toUTCString(),
+    "last-modified": src.lastModified.toUTCString(),
     "cache-control": opts.cacheSeconds ? `private, max-age=${opts.cacheSeconds}` : "private, no-cache",
     "x-content-type-options": "nosniff",
   };
@@ -58,14 +57,36 @@ export async function serveFile(
     if (start > end || start >= size) {
       return new Response(null, { status: 416, headers: { ...headers, "content-range": `bytes */${size}` } });
     }
-    const stream = Readable.toWeb(createReadStream(filePath, { start, end })) as ReadableStream<Uint8Array>;
-    return new Response(stream, {
-      status: 206,
-      headers: { ...headers, "content-range": `bytes ${start}-${end}/${size}`, "content-length": String(end - start + 1) },
-    });
+    const partial = { ...headers, "content-range": `bytes ${start}-${end}/${size}`, "content-length": String(end - start + 1) };
+    if (request.method === "HEAD") return new Response(null, { status: 206, headers: partial });
+    return new Response(await src.open({ start, end }), { status: 206, headers: partial });
   }
 
-  if (request.method === "HEAD") return new Response(null, { status: 200, headers: { ...headers, "content-length": String(size) } });
-  const stream = Readable.toWeb(createReadStream(filePath)) as ReadableStream<Uint8Array>;
-  return new Response(stream, { status: 200, headers: { ...headers, "content-length": String(size) } });
+  const full = { ...headers, "content-length": String(size) };
+  if (request.method === "HEAD") return new Response(null, { status: 200, headers: full });
+  return new Response(await src.open(), { status: 200, headers: full });
+}
+
+/** Serves a local file (see `rangeResponse`). */
+export async function serveFile(request: Request, filePath: string, opts: ServeOptions): Promise<Response> {
+  let size: number;
+  let mtime: Date;
+  try {
+    const st = await fs.stat(filePath);
+    if (!st.isFile()) throw new Error("not a file");
+    size = st.size;
+    mtime = st.mtime;
+  } catch {
+    throw new AppError("NOT_FOUND", { message: "That file isn't available (it may still be processing)." });
+  }
+  return rangeResponse(
+    request,
+    {
+      size,
+      etag: `"${size.toString(16)}-${mtime.getTime().toString(16)}"`,
+      lastModified: mtime,
+      open: async (r) => Readable.toWeb(createReadStream(filePath, r ? { start: r.start, end: r.end } : {})) as ReadableStream<Uint8Array>,
+    },
+    opts,
+  );
 }
