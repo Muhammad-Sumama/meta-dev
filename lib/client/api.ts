@@ -64,6 +64,7 @@ const jsonBody = (v: unknown) => JSON.stringify(v);
 export interface HealthInfo {
   ok: boolean;
   storage: { backend: "file" | "postgres"; ok: boolean; message: string };
+  media: { backend: "local" | "s3"; ok: boolean; message: string };
   ffmpeg: { available: boolean; version: string | null; encoders: Record<string, boolean>; source: { ffmpeg: string; ffprobe: string } | null };
   formats: Record<string, boolean>;
   ai: {

@@ -3,6 +3,7 @@ import { publicConfig } from "@/lib/server/config";
 import { getAIServices } from "@/services/ai/registry";
 import { getJobQueue } from "@/services/jobs/runtime";
 import { getProjectRepository } from "@/services/projects";
+import { getObjectStore } from "@/services/storage/objectStore";
 import { getFFmpegCapabilities } from "@/services/video/ffmpeg";
 import { FORMAT_SPECS, isFormatAvailable } from "@/services/export/formats";
 
@@ -24,9 +25,12 @@ export const GET = route(async () => {
   ]).catch(() => ({ backend: jobs.backend, error: "The job queue (Redis) is unreachable, so videos can't be processed." }));
   const repo = getProjectRepository();
   const storage = { backend: repo.backend, ...(await repo.health()) };
+  const objects = getObjectStore();
+  const media = objects ? { backend: "s3" as const, ...(await objects.health()) } : { backend: "local" as const, ok: true, message: "DATA_DIR" };
   return json({
-    ok: ffmpeg.available && !("error" in queue) && storage.ok,
+    ok: ffmpeg.available && !("error" in queue) && storage.ok && media.ok,
     storage,
+    media,
     ffmpeg: { available: ffmpeg.available, version: ffmpeg.version, encoders: ffmpeg.encoders, source: ffmpeg.source ?? null },
     formats,
     ai: {

@@ -41,6 +41,21 @@ const EnvSchema = z.object({
   DATABASE_URL: z.string().regex(/^postgres(ql)?:\/\//, "must start with postgres:// or postgresql://").optional(),
   DATABASE_POOL_SIZE: z.coerce.number().int().min(1).max(100).default(10),
 
+  /** Where media and exports live: DATA_DIR only, or an S3-compatible bucket (DATA_DIR becomes a cache). */
+  MEDIA_STORE: z.enum(["local", "s3"]).default("local"),
+  S3_BUCKET: z.string().regex(/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/, "not a valid bucket name").optional(),
+  S3_REGION: z.string().default("us-east-1"),
+  /** For S3-compatible services (MinIO, R2, …); omit for AWS. */
+  S3_ENDPOINT: z.string().url().optional(),
+  S3_FORCE_PATH_STYLE: bool.default(false),
+  /** Optional; without them the AWS default credential chain is used. */
+  S3_ACCESS_KEY_ID: z.string().optional(),
+  S3_SECRET_ACCESS_KEY: z.string().optional(),
+  /** Key prefix inside the bucket, e.g. "opensam/prod". */
+  S3_PREFIX: z.string().regex(/^[A-Za-z0-9/_.-]{0,200}$/).default(""),
+  /** MEDIA_STORE=s3: local cache of downloaded media per machine. */
+  MEDIA_CACHE_MAX_MB: z.coerce.number().int().min(256).default(20_480),
+
   LLM_PROVIDER: z.enum(["mock", "llama"]).default("mock"),
   LLAMA_BASE_URL: z.string().url().default("http://localhost:11434/v1"),
   LLAMA_API_KEY: z.string().optional(),
@@ -76,6 +91,9 @@ export function getConfig(): ServerConfig {
   }
   if (parsed.data.PROJECT_STORE === "postgres" && !parsed.data.DATABASE_URL) {
     throw new Error("Invalid environment configuration: DATABASE_URL is required when PROJECT_STORE=postgres");
+  }
+  if (parsed.data.MEDIA_STORE === "s3" && !parsed.data.S3_BUCKET) {
+    throw new Error("Invalid environment configuration: S3_BUCKET is required when MEDIA_STORE=s3");
   }
   cached = { ...parsed.data, dataDir: path.resolve(parsed.data.DATA_DIR) };
   return cached;

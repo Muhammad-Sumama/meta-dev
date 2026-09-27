@@ -11,8 +11,9 @@ import { newId } from "@/lib/utils/ids";
 import { getAIServices } from "../ai/registry";
 import { FORMAT_SPECS } from "../export/formats";
 import { getJobQueue } from "../jobs/runtime";
-import { assertDiskSpace, writeJsonAtomic } from "../storage/fs";
+import { assertDiskSpace } from "../storage/fs";
 import { exportsDir, mediaPath, tmpDir } from "../storage/paths";
+import { publish, removePublishedFiles, writeProjectJson } from "../storage/projectMedia";
 import { createProjectFromFile, receiveUpload } from "../video/upload";
 import { sniffContainer } from "@/lib/validation/upload";
 import { getProjectRepository, requireProject } from "./index";
@@ -89,6 +90,7 @@ export async function createDemoProject(): Promise<{ project: Project; job: Job 
   let finalProject = project;
   try {
     await fs.copyFile(webm, mediaPath(project.id, "proxy-vp9.webm"));
+    await publish(project.id, "media/proxy-vp9.webm", "video/webm");
     finalProject = await getProjectRepository().update(project.id, (p) => {
       p.media.vp9Proxy = { status: "ready", fileName: "proxy-vp9.webm" };
     });
@@ -135,6 +137,7 @@ export async function deleteProject(projectId: string) {
   for (const j of await queue.list({ projectId, activeOnly: true })) await queue.cancel(j.id);
   await getAIServices().sam2.disposeProject(projectId);
   await getProjectRepository().delete(projectId);
+  await removePublishedFiles(projectId);
 }
 
 // ---------------------------------------------------------------------------
@@ -325,7 +328,7 @@ export async function startExport(projectId: string, req: ExportRequest): Promis
     p.composite = composite;
     p.jobIds = [...p.jobIds, job.id].slice(-500);
   });
-  // Metadata for the download endpoint; the job fills in the rest.
-  await writeJsonAtomic(path.join(exportsDir(projectId), `${exportId}.meta.json`), { exportId, jobId: job.id, format: spec.format });
+  // For the download endpoint while the job runs; the worker writes <exportId>.result.json when done.
+  await writeProjectJson(projectId, `exports/${exportId}.meta.json`, { exportId, jobId: job.id, format: spec.format });
   return { job, exportId };
 }

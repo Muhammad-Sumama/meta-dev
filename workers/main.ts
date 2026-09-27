@@ -24,6 +24,12 @@ async function main() {
     console.error("[worker] JOB_BACKEND must be \"redis\" to run a separate worker (memory mode runs jobs inside the web server).");
     process.exit(2);
   }
+  if (config.PROJECT_STORE === "file" || config.MEDIA_STORE === "local") {
+    console.warn(
+      `[worker] ${config.PROJECT_STORE === "file" ? "Projects" : "Media"} live in DATA_DIR (${config.dataDir}): this worker and the web server must share it. ` +
+        "For separate machines use PROJECT_STORE=postgres and MEDIA_STORE=s3.",
+    );
+  }
   const types = workerJobTypes();
   const queue = createRedisJobQueue();
   registerWorkers(queue);

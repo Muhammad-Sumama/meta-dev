@@ -138,7 +138,7 @@ services/
   video/                 safe FFmpeg wrapper, ffprobe, frame streaming, ingest (poster/filmstrip/proxies), uploads
   export/                ExportService, format specs
   jobs/                  JobQueuePort: in-process JobQueue (+ file store), redis/RedisJobQueue (BullMQ), runtime
-  projects/ storage/     repository (files | postgres/), import between stores, path safety
+  projects/ storage/     repository (files | postgres/), import between stores; path safety, object store (s3/), project files
 workers/                 job handlers: ingest, segmentation, export; main.ts = worker process
 lib/
   schemas/               zod schemas: command, project, job, API requests
@@ -209,6 +209,14 @@ Nothing is exposed to the browser except non-secret status via `/api/health`.
 | `PROJECT_STORE` | `file` | Project/track metadata: `file` (JSON in `DATA_DIR`) or `postgres` |
 | `DATABASE_URL` | – | `postgres://…`, required with `PROJECT_STORE=postgres` |
 | `DATABASE_POOL_SIZE` | `10` | PostgreSQL connections per process |
+| `MEDIA_STORE` | `local` | Media and exports: `local` (`DATA_DIR`) or `s3` (bucket; `DATA_DIR` becomes a cache) |
+| `S3_BUCKET` | – | Bucket name, required with `MEDIA_STORE=s3` |
+| `S3_REGION` | `us-east-1` | Bucket region |
+| `S3_ENDPOINT` | – | For S3-compatible services (MinIO, R2, …); omit for AWS |
+| `S3_FORCE_PATH_STYLE` | `false` | `true` for MinIO and most self-hosted services |
+| `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY` | – | Optional; otherwise the AWS default credential chain (env, instance role, …) |
+| `S3_PREFIX` | – | Key prefix inside the bucket, e.g. `opensam/prod` |
+| `MEDIA_CACHE_MAX_MB` | `20480` | Per-machine cache of downloaded media (S3 mode) |
 | `LLM_PROVIDER` | `mock` | `mock` or `llama` |
 | `LLAMA_BASE_URL` | `http://localhost:11434/v1` | OpenAI-compatible endpoint |
 | `LLAMA_MODEL` | `llama3.1:8b` | Model name at that endpoint |
@@ -266,8 +274,9 @@ npm run build && npm start                     # web server(s)
 - **Scaling:** start more workers; each takes `JOB_CONCURRENCY` jobs per type.
   Split by hardware with `WORKER_JOB_TYPES=segment` (GPU hosts) and
   `WORKER_JOB_TYPES=ingest,export` (CPU hosts).
-- **Shared storage:** web and workers must see the same `DATA_DIR` (a shared
-  volume). Project updates take a lock file, so concurrent writers are safe.
+- **Storage:** web and workers must either share `DATA_DIR` (a shared volume;
+  project updates take a lock file, so concurrent writers are safe) or use
+  `PROJECT_STORE=postgres` + `MEDIA_STORE=s3`, which needs no shared disk.
 - **Shutdown:** SIGTERM stops taking jobs, gives running ones
   `WORKER_SHUTDOWN_GRACE_MS` to finish, and records the rest as *interrupted*
   (the user sees "run it again").
@@ -291,6 +300,27 @@ listing never loads mask data). Updates are transactions with row locks, so
 any number of web servers and workers can write concurrently. Tables are
 prefixed `opensam_`, so a shared database is fine. Media files stay in
 `DATA_DIR`.
+
+### Storing media in S3 (no shared disk)
+
+```bash
+export MEDIA_STORE=s3 S3_BUCKET=my-opensam-media S3_REGION=eu-west-1
+# MinIO / R2 / other S3-compatible services:
+# export S3_ENDPOINT=http://minio:9000 S3_FORCE_PATH_STYLE=true S3_ACCESS_KEY_ID=… S3_SECRET_ACCESS_KEY=…
+```
+
+Every file a process produces — the upload, poster, filmstrip, previews,
+exports — is published to the bucket under `projects/<id>/…`. Processes that
+need a file on disk (FFmpeg, the SAM 2 upload) download it into their own
+`DATA_DIR`, which becomes a cache capped at `MEDIA_CACHE_MAX_MB` (least
+recently used files go first; files used in the last hour are kept). The web
+server streams media to the browser from its cache or straight from the
+bucket, with Range support, so playback stays same-origin (canvas previews
+need that) and no bucket CORS setup is needed.
+
+With Redis jobs + PostgreSQL + S3, web servers and workers share nothing but
+those three services, so they can run on separate machines — e.g. workers
+with `WORKER_JOB_TYPES=segment` on GPU hosts.
 
 ## Running with mock AI
 
@@ -426,7 +456,7 @@ seams where it will be split:
 | --- | --- | --- |
 | In-process `JobQueue` + JSON job files (default) | **Available:** `JOB_BACKEND=redis` — BullMQ on Redis, `npm run worker` processes | `services/jobs/types.ts` (`JobQueuePort`; handlers only see `signal` + `progress`) |
 | `FileSystemProjectRepository` (default) | **Available:** `PROJECT_STORE=postgres` — projects and tracks in PostgreSQL | `services/projects/ProjectRepository.ts` |
-| Local `data/` media | S3/GCS with signed range URLs, CDN for previews | `services/storage/paths.ts`, media route |
+| Local `data/` media (default) | **Available:** `MEDIA_STORE=s3` — S3 or compatible storage, per-machine cache, range streaming. Next: signed URLs/CDN for previews | `services/storage/objectStore.ts`, `services/storage/projectMedia.ts` |
 | Mock / single inference server | Autoscaled GPU pool behind a load balancer, session affinity by video | `services/sam2/SAM2Provider.ts` contract |
 | Job status polling | **Available:** server-sent events per project (works across worker processes via Redis pub/sub), polling fallback | `services/jobs/events.ts`, `hooks/useJobUpdates.ts` |
 | In-memory rate limits | Redis rate limiting at the edge | `lib/server/api.ts` |
@@ -438,7 +468,7 @@ at scale it would move to the GPU workers (or FFmpeg filter graphs with
 ## Testing
 
 ```bash
-npm test                 # 203 Vitest tests: unit, components (jsdom), integration
+npm test                 # 219 Vitest tests: unit, components (jsdom), integration
 npm run test:e2e         # Playwright (set PLAYWRIGHT_CHROMIUM_EXECUTABLE to reuse a local Chromium)
 cd inference && pytest   # Python contract tests (no GPU needed)
 ```
@@ -473,6 +503,14 @@ cd inference && pytest   # Python contract tests (no GPU needed)
   cascading deletes; plus concurrent migrations, unreachable database →
   friendly error, and file → PostgreSQL import. The multi-process pipeline
   suite also runs with PostgreSQL as the store.
+- **Object storage** (skipped without `moto_server`, from
+  `pip install -r inference/requirements-dev.txt`) — against an S3-compatible
+  server: multipart upload of a 40 MB file, download-on-demand with
+  concurrent requests deduplicated, serving from the bucket with Range /
+  416 / HEAD / 304, JSON documents across machines, LRU cache trimming,
+  deleting a project's objects, and an unreachable store → friendly error.
+  The multi-process pipeline suite also runs with **separate disks** for the
+  web and worker processes (Redis + PostgreSQL + S3 only).
 - **Job queue on Redis** (skipped if `redis-server` isn't installed) — a
   throwaway Redis per run: cross-process progress/results, cancelling queued
   and running jobs, graceful shutdown (including handlers that ignore the

@@ -158,9 +158,11 @@ export function SettingsDialog({ open, onOpenChange }: { open: boolean; onOpenCh
                   Upload limit {health.config.maxUploadMb} MB · max length {Math.round(health.config.maxDurationSeconds / 60)} min · masks computed at {health.config.analysisMaxSize}px
                 </p>
                 <QueueStatus queue={health.queue} />
-                <p className={cn("mt-1 text-[12px]", health.storage.ok ? "text-muted" : "text-danger")}>
-                  Projects stored in {health.storage.backend === "postgres" ? "PostgreSQL" : "JSON files"}
+                <p className={cn("mt-1 text-[12px]", health.storage.ok && health.media.ok ? "text-muted" : "text-danger")}>
+                  Projects stored in {health.storage.backend === "postgres" ? "PostgreSQL" : "JSON files"} · media in{" "}
+                  {health.media.backend === "s3" ? "object storage (S3)" : "the local data folder"}
                   {health.storage.ok ? "" : ` — ${health.storage.message}`}
+                  {health.media.ok ? "" : ` — ${health.media.message}`}
                 </p>
               </div>
             ) : null}

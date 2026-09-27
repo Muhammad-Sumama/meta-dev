@@ -7,9 +7,10 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { once } from "node:events";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { ListObjectsV2Command } from "@aws-sdk/client-s3";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { setConfigForTesting } from "@/lib/server/config";
 import * as healthRoute from "@/app/api/health/route";
@@ -18,29 +19,36 @@ import * as commandsRoute from "@/app/api/projects/[projectId]/commands/route";
 import * as eventsRoute from "@/app/api/projects/[projectId]/events/route";
 import * as exportRoute from "@/app/api/projects/[projectId]/exports/[exportId]/route";
 import * as exportsRoute from "@/app/api/projects/[projectId]/exports/route";
+import * as mediaRoute from "@/app/api/projects/[projectId]/media/[asset]/route";
 import * as projectRoute from "@/app/api/projects/[projectId]/route";
 import * as trackItemRoute from "@/app/api/projects/[projectId]/tracks/[trackId]/route";
 import { resetJobQueueForTesting, getJobQueue } from "@/services/jobs/runtime";
 import { resetProjectRepositoryForTesting } from "@/services/projects";
+import { resetObjectStoreForTesting } from "@/services/storage/objectStore";
 import { DEMO_VIDEO } from "../helpers/evalDemo";
 import { postgresAvailable, startPostgres } from "../helpers/postgres";
 import { redisAvailable, startRedis } from "../helpers/redis";
+import { s3Available, startS3 } from "../helpers/s3";
 import { type Handler, call, upload, waitJob } from "../helpers/routes";
 import { readSse } from "../helpers/sse";
 
 const MODES = [
-  { name: "project store: files", store: "file" as const, available: redisAvailable },
-  { name: "project store: PostgreSQL", store: "postgres" as const, available: redisAvailable && postgresAvailable },
+  { name: "shared disk, project store: files", store: "file" as const, s3: false, available: redisAvailable },
+  { name: "shared disk, project store: PostgreSQL", store: "postgres" as const, s3: false, available: redisAvailable && postgresAvailable },
+  // Like separate machines: web and worker have their own DATA_DIR and share only Redis, PostgreSQL and S3.
+  { name: "separate disks, PostgreSQL + S3", store: "postgres" as const, s3: true, available: redisAvailable && postgresAvailable && s3Available },
 ];
 
-describe.each(MODES)("separate worker process (JOB_BACKEND=redis, $name)", ({ store, available }) => {
+describe.each(MODES)("separate worker process (JOB_BACKEND=redis, $name)", ({ store, s3: useS3, available }) => {
   if (!available) {
     it.skip("needs redis-server (and PostgreSQL for this mode)", () => {});
     return;
   }
   let redis: { url: string; stop(): Promise<void> };
   let postgres: { url: string; stop(): Promise<void> } | null = null;
+  let s3: Awaited<ReturnType<typeof startS3>> | null = null;
   let dataDir: string;
+  let workerDataDir: string;
   let worker: ChildProcess;
   let workerLog = "";
   let projectId: string;
@@ -54,12 +62,13 @@ describe.each(MODES)("separate worker process (JOB_BACKEND=redis, $name)", ({ st
         JOB_BACKEND: "redis",
         REDIS_URL: redis.url,
         JOB_QUEUE_PREFIX: prefix,
-        DATA_DIR: dataDir,
+        DATA_DIR: workerDataDir,
         MIN_FREE_DISK_MB: "0",
         JOB_CONCURRENCY: "2",
         WORKER_SHUTDOWN_GRACE_MS: "300",
         PROJECT_STORE: store,
         ...(postgres ? { DATABASE_URL: postgres.url } : {}),
+        ...(s3 ? Object.fromEntries(Object.entries(s3.config).map(([k, v]) => [k, String(v)])) : {}),
       },
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -83,7 +92,9 @@ describe.each(MODES)("separate worker process (JOB_BACKEND=redis, $name)", ({ st
   beforeAll(async () => {
     redis = await startRedis();
     if (store === "postgres") postgres = await startPostgres();
-    dataDir = mkdtempSync(path.join(os.tmpdir(), "opensam-worker-"));
+    if (useS3) s3 = await startS3();
+    dataDir = mkdtempSync(path.join(os.tmpdir(), "opensam-web-"));
+    workerDataDir = useS3 ? mkdtempSync(path.join(os.tmpdir(), "opensam-worker-")) : dataDir;
     setConfigForTesting({
       DATA_DIR: dataDir,
       MIN_FREE_DISK_MB: 0,
@@ -93,7 +104,9 @@ describe.each(MODES)("separate worker process (JOB_BACKEND=redis, $name)", ({ st
       RUN_WORKERS_IN_WEB: false,
       PROJECT_STORE: store,
       DATABASE_URL: postgres?.url,
+      ...(s3 ? s3.config : { MEDIA_STORE: "local" as const }),
     });
+    resetObjectStoreForTesting();
     await resetJobQueueForTesting();
     await resetProjectRepositoryForTesting();
     const w = startWorker();
@@ -109,15 +122,19 @@ describe.each(MODES)("separate worker process (JOB_BACKEND=redis, $name)", ({ st
     await resetJobQueueForTesting();
     await resetProjectRepositoryForTesting();
     setConfigForTesting(null);
+    resetObjectStoreForTesting();
     await redis?.stop();
     await postgres?.stop();
+    await s3?.stop();
     rmSync(dataDir, { recursive: true, force: true });
+    rmSync(workerDataDir, { recursive: true, force: true });
   });
 
   it("reports the Redis queue and its workers in health", async () => {
     const { json } = await call(healthRoute.GET as Handler);
     expect(json.queue).toMatchObject({ backend: "redis", workers: { ingest: 1, segment: 1, export: 1 } });
     expect(json.storage).toMatchObject({ backend: store, ok: true });
+    expect(json.media).toMatchObject({ backend: useS3 ? "s3" : "local", ok: true });
     expect(json.ok).toBe(true);
   });
 
@@ -131,6 +148,14 @@ describe.each(MODES)("separate worker process (JOB_BACKEND=redis, $name)", ({ st
     const { json: bundle } = await call(projectRoute.GET as Handler, { params: { projectId } });
     expect(bundle.project.media).toMatchObject({ poster: true, filmstrip: { status: "ready" } });
     expect(bundle.jobs.map((j: { id: string }) => j.id)).toContain(json.job.id);
+    // The worker made the poster; the web side serves it (from the bucket when disks are separate).
+    const poster = await call(mediaRoute.GET as Handler, { params: { projectId, asset: "poster" } });
+    expect(poster.res.status).toBe(200);
+    expect(Buffer.from(await poster.res.arrayBuffer()).subarray(0, 2).toString("hex")).toBe("ffd8"); // JPEG
+    if (useS3) {
+      expect(existsSync(path.join(dataDir, "projects", projectId, "media", "poster.jpg"))).toBe(false);
+      expect(existsSync(path.join(workerDataDir, "projects", projectId, "media", "source.mp4"))).toBe(true); // fetched from S3
+    }
   });
 
   it("runs an AI command in the worker and the web side sees the track", async () => {
@@ -215,5 +240,15 @@ describe.each(MODES)("separate worker process (JOB_BACKEND=redis, $name)", ({ st
     worker = next.proc;
     await next.ready;
     expect((await waitJob(queued.job.id)).status).toBe("completed");
+  });
+
+  it("deletes the project everywhere", async () => {
+    const del = await call(projectRoute.DELETE as Handler, { method: "DELETE", params: { projectId } });
+    expect(del.res.status).toBe(200);
+    expect((await call(projectRoute.GET as Handler, { params: { projectId } })).res.status).toBe(404);
+    if (s3) {
+      const listed = await s3.client.send(new ListObjectsV2Command({ Bucket: s3.bucket, Prefix: `projects/${projectId}/` }));
+      expect(listed.KeyCount ?? 0).toBe(0);
+    }
   });
 });

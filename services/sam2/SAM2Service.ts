@@ -2,7 +2,7 @@ import "server-only";
 import { AppError, toAppError } from "@/lib/errors";
 import type { Target } from "@/lib/schemas/command";
 import type { FramePrompt, PointPrompt, Project } from "@/lib/schemas/project";
-import { mediaPath } from "../storage/paths";
+import { ensureLocal, localProjectFile } from "../storage/projectMedia";
 import type {
   CallOptions,
   Detection,
@@ -33,10 +33,10 @@ export class SAM2Service {
     return this.provider.health();
   }
 
-  static videoSource(project: Project): VideoSource {
+  static videoSource(project: Project, filePath = localProjectFile(project.id, `media/${project.video.fileName}`)): VideoSource {
     return {
       projectId: project.id,
-      filePath: mediaPath(project.id, project.video.fileName),
+      filePath,
       version: `${project.video.sizeBytes.toString(36)}${Date.parse(project.createdAt).toString(36)}`,
       width: project.video.width,
       height: project.video.height,
@@ -52,6 +52,8 @@ export class SAM2Service {
     project: Project,
     opts: CallOptions & { onProgress?: (fraction: number, message: string) => void } = {},
   ): Promise<VideoSession> {
+    // Sessions read the video from this machine's disk (with MEDIA_STORE=s3 it's a cache: fetch/refresh it).
+    const filePath = await ensureLocal(project.id, `media/${project.video.fileName}`);
     const key = `${project.id}:${project.analysis.width}x${project.analysis.height}`;
     const cached = this.sessions.get(key);
     if (cached) {
@@ -63,7 +65,7 @@ export class SAM2Service {
       }
     }
     const session = this.provider
-      .initializeVideo(SAM2Service.videoSource(project), opts)
+      .initializeVideo(SAM2Service.videoSource(project, filePath), opts)
       .catch((err) => {
         this.sessions.delete(key);
         throw this.map(err, "SEGMENTATION_FAILED");

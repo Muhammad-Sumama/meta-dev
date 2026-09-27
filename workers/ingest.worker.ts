@@ -1,7 +1,9 @@
 import "server-only";
 import type { JobHandler } from "@/services/jobs/types";
-import { getProjectRepository, requireProject } from "@/services/projects";
+import { getProjectRepository } from "@/services/projects";
+import { requireJobProject } from "./project";
 import { mediaPath } from "@/services/storage/paths";
+import { ensureLocal, publish } from "@/services/storage/projectMedia";
 import { generateFilmstrip, generatePoster, generateProxy, generateVp9Proxy } from "@/services/video/ingest";
 
 export interface IngestInput {
@@ -17,8 +19,8 @@ export interface IngestInput {
  */
 export const ingestWorker: JobHandler<IngestInput, { proxy: boolean }> = async ({ job, signal, progress }) => {
   const repo = getProjectRepository();
-  const project = await requireProject(job.input.projectId);
-  const source = mediaPath(project.id, project.video.fileName);
+  const project = await requireJobProject(job.input.projectId);
+  const source = await ensureLocal(project.id, `media/${project.video.fileName}`);
 
   if (job.input.task === "vp9_proxy") {
     progress({ stage: "proxy", message: "Creating a preview your browser can play…", fraction: 0.02 });
@@ -27,6 +29,7 @@ export const ingestWorker: JobHandler<IngestInput, { proxy: boolean }> = async (
         signal,
         onProgress: (f) => progress({ fraction: 0.02 + f * 0.97, message: `Creating a preview your browser can play… ${Math.round(f * 100)}%` }),
       });
+      await publish(project.id, "media/proxy-vp9.webm", "video/webm");
       await repo.update(project.id, (p) => {
         p.media.vp9Proxy = { status: "ready", fileName: "proxy-vp9.webm" };
       });
@@ -42,6 +45,7 @@ export const ingestWorker: JobHandler<IngestInput, { proxy: boolean }> = async (
   progress({ stage: "poster", message: "Generating preview frame…", fraction: 0.05 });
   try {
     await generatePoster(source, mediaPath(project.id, "poster.jpg"), { signal });
+    await publish(project.id, "media/poster.jpg", "image/jpeg");
     await repo.update(project.id, (p) => {
       p.media.poster = true;
     });
@@ -58,6 +62,7 @@ export const ingestWorker: JobHandler<IngestInput, { proxy: boolean }> = async (
       signal,
       onProgress: (f) => progress({ fraction: 0.1 + f * filmstripShare }),
     });
+    await publish(project.id, "media/filmstrip.jpg", "image/jpeg");
     await repo.update(project.id, (p) => {
       p.media.filmstrip = { status: "ready", ...layout };
     });
@@ -76,6 +81,7 @@ export const ingestWorker: JobHandler<IngestInput, { proxy: boolean }> = async (
         signal,
         onProgress: (f) => progress({ fraction: 0.45 + f * 0.54, message: `Creating a browser-friendly preview… ${Math.round(f * 100)}%` }),
       });
+      await publish(project.id, "media/proxy.mp4", "video/mp4");
       await repo.update(project.id, (p) => {
         p.media.proxy = { status: "ready", fileName: "proxy.mp4" };
       });
