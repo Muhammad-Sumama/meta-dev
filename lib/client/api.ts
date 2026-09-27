@@ -126,6 +126,7 @@ export const api = {
   listJobs: (pid: string, activeOnly = false) => request<{ jobs: Job[] }>(`/api/projects/${pid}/jobs${activeOnly ? "?active=1" : ""}`),
 
   mediaUrl: (pid: string, asset: "preview" | "source" | "poster" | "filmstrip") => `/api/projects/${pid}/media/${asset}`,
+  eventsUrl: (pid: string) => `/api/projects/${pid}/events`,
   exportUrl: (pid: string, exportId: string) => `/api/projects/${pid}/exports/${exportId}`,
 };
 

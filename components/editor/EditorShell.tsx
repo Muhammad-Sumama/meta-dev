@@ -8,7 +8,7 @@ import { api, errorText } from "@/lib/client/api";
 import { autosave } from "@/lib/client/autosave";
 import { VideoController } from "@/lib/client/video";
 import type { ExportKind } from "@/lib/schemas/project";
-import { useJobPolling } from "@/hooks/useJobPolling";
+import { useJobUpdates } from "@/hooks/useJobUpdates";
 import { useShortcuts } from "@/hooks/useShortcuts";
 import { useEditor } from "@/stores/editor";
 import { useSystem } from "@/stores/system";
@@ -105,7 +105,7 @@ export function EditorShell({ projectId }: { projectId: string }) {
     return () => window.removeEventListener("beforeunload", onUnload);
   }, []);
 
-  useJobPolling(status === "ready" ? projectId : undefined);
+  useJobUpdates(status === "ready" ? projectId : undefined);
   useShortcuts(status === "ready" ? ui : null);
 
   if (status === "loading" || (status === "ready" && !project)) {

@@ -15,6 +15,7 @@ import { setConfigForTesting } from "@/lib/server/config";
 import * as healthRoute from "@/app/api/health/route";
 import * as jobRoute from "@/app/api/jobs/[jobId]/route";
 import * as commandsRoute from "@/app/api/projects/[projectId]/commands/route";
+import * as eventsRoute from "@/app/api/projects/[projectId]/events/route";
 import * as exportRoute from "@/app/api/projects/[projectId]/exports/[exportId]/route";
 import * as exportsRoute from "@/app/api/projects/[projectId]/exports/route";
 import * as projectRoute from "@/app/api/projects/[projectId]/route";
@@ -23,6 +24,7 @@ import { resetJobQueueForTesting, getJobQueue } from "@/services/jobs/runtime";
 import { DEMO_VIDEO } from "../helpers/evalDemo";
 import { redisAvailable, startRedis } from "../helpers/redis";
 import { type Handler, call, upload, waitJob } from "../helpers/routes";
+import { readSse } from "../helpers/sse";
 
 describe.skipIf(!redisAvailable)("separate worker process (JOB_BACKEND=redis)", () => {
   let redis: { url: string; stop(): Promise<void> };
@@ -112,6 +114,18 @@ describe.skipIf(!redisAvailable)("separate worker process (JOB_BACKEND=redis)", 
     expect(Object.keys(t.track.frames).length).toBeGreaterThan(250);
     const { json: bundle } = await call(projectRoute.GET as Handler, { params: { projectId } });
     expect(bundle.project.commands.at(-1)).toMatchObject({ status: "completed", trackId: carTrackId });
+  });
+
+  it("streams the worker's progress to the browser over SSE", async () => {
+    const request = new Request(`http://localhost/api/projects/${projectId}/events`);
+    const res = await (eventsRoute.GET as Handler)(request, { params: Promise.resolve({ projectId }) });
+    const sse = readSse(res);
+    await sse.until((e) => e.event === "snapshot");
+    const { json } = await call(commandsRoute.POST as Handler, { method: "POST", body: { text: "Isolate the dog", frameIndex: 0 }, params: { projectId } });
+    await sse.until((e) => e.event === "job" && e.data.id === json.job.id && e.data.status === "completed", 60_000);
+    const updates = sse.events.filter((e) => e.event === "job" && e.data.id === json.job.id).map((e) => e.data);
+    expect(updates.some((u) => u.status === "processing" && u.progress.fraction > 0 && u.progress.fraction < 1)).toBe(true);
+    await sse.cancel();
   });
 
   it("exports in the worker and downloads from the web side", async () => {

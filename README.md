@@ -93,7 +93,7 @@ so there is nothing else to install. In the demo, try the suggestions:
 │             └─ InteractionLayer (click / box / brush / eraser)    │
 │  Timeline · AI panel · Objects · Output · Export/Settings dialogs │
 └───────────────┬──────────────────────────────────────────────────┘
-                │ JSON / streamed uploads / range requests
+                │ JSON · streamed uploads · range requests · SSE
 ┌───────────────▼──────────── Next.js route handlers (app/api) ────┐
 │ validation (zod) · rate limits · friendly errors                  │
 │ ProjectService (use-cases)                                        │
@@ -116,7 +116,9 @@ so there is nothing else to install. In the demo, try the suggestions:
 a separate Python service (`inference/`) behind an HTTP contract. Everything
 else — upload, jobs, compositing, export — is TypeScript in one Next.js app,
 which keeps local setup to `npm install`. Long work (tracking, exports,
-transcodes) runs as jobs so the UI never blocks; the browser polls job status.
+transcodes) runs as jobs so the UI never blocks; progress streams to the
+browser as server-sent events (`/api/projects/:id/events`), with polling as a
+fallback.
 Jobs run inside the web server by default, or in separate worker processes on
 other machines with `JOB_BACKEND=redis`.
 
@@ -126,7 +128,7 @@ other machines with `JOB_BACKEND=redis`.
 app/                     Next.js App Router
   page.tsx               landing page
   editor/                project picker + editor route
-  api/                   REST API (projects, media, segment, track, commands, exports, jobs, health)
+  api/                   REST API (projects, media, segment, track, commands, exports, jobs, events (SSE), health)
 components/
   editor/ video/ timeline/ ai/ export/ landing/ ui/ (shadcn-style primitives on Radix)
 services/
@@ -406,7 +408,7 @@ seams where it will be split:
 | `FileSystemProjectRepository` | PostgreSQL (projects, tracks; masks as JSONB or in object storage) | `services/projects/ProjectRepository.ts` |
 | Local `data/` media | S3/GCS with signed range URLs, CDN for previews | `services/storage/paths.ts`, media route |
 | Mock / single inference server | Autoscaled GPU pool behind a load balancer, session affinity by video | `services/sam2/SAM2Provider.ts` contract |
-| Polling job status | Server-sent events / WebSockets | `hooks/useJobPolling.ts` |
+| Job status polling | **Available:** server-sent events per project (works across worker processes via Redis pub/sub), polling fallback | `services/jobs/events.ts`, `hooks/useJobUpdates.ts` |
 | In-memory rate limits | Redis rate limiting at the edge | `lib/server/api.ts` |
 
 Export compositing is plain TypeScript over raw frames piped through FFmpeg;
@@ -416,7 +418,7 @@ at scale it would move to the GPU workers (or FFmpeg filter graphs with
 ## Testing
 
 ```bash
-npm test                 # 171 Vitest tests: unit, components (jsdom), integration
+npm test                 # 181 Vitest tests: unit, components (jsdom), integration
 npm run test:e2e         # Playwright (set PLAYWRIGHT_CHROMIUM_EXECUTABLE to reuse a local Chromium)
 cd inference && pytest   # Python contract tests (no GPU needed)
 ```
@@ -441,6 +443,10 @@ cd inference && pytest   # Python contract tests (no GPU needed)
   the H.264 and VP9 preview proxies show exactly the frame masks were computed
   on, portrait video is analysed upright, box → track matches ground truth,
   and exports keep display orientation, every frame and the audio.
+- **Live updates** — the SSE route (snapshot, coalesced progress, no job
+  inputs on the wire, cleanup on abort/disconnect, cross-process via Redis) and
+  the client hook (results applied exactly once, no replay of old jobs after a
+  reconnect, fallback to polling, out-of-order updates never regress a job).
 - **Job queue on Redis** (skipped if `redis-server` isn't installed) — a
   throwaway Redis per run: cross-process progress/results, cancelling queued
   and running jobs, graceful shutdown (including handlers that ignore the
@@ -450,7 +456,8 @@ cd inference && pytest   # Python contract tests (no GPU needed)
 - **Python** — the inference server's HTTP contract with a fake backend, plus
   SAM 2 frame extraction on the web app's frame grid.
 - **E2E** — landing page → Try Demo → AI command → effect → shortcuts/undo →
-  export → download; a real upload of a rotated variable-frame-rate phone
+  export → download (asserting progress arrives over the event stream with no
+  job polling); a real upload of a rotated variable-frame-rate phone
   clip → preview proxy → click-to-track, comparing the decoded video pixels
   with the mask overlay's pixels frame by frame (and after pausing mid-play);
   plus an accessible-name audit of every editor button.

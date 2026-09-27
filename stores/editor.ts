@@ -2,7 +2,7 @@
 
 import { create } from "zustand";
 import type { Doc } from "@/lib/client/doc";
-import type { Job } from "@/lib/schemas/job";
+import { isTerminal, JOB_STAGE_RANK, type Job } from "@/lib/schemas/job";
 import { DEFAULT_COMPOSITE, type CommandRecord, type Project, type Track } from "@/lib/schemas/project";
 
 export type Tool = "select" | "track" | "box" | "brush" | "eraser" | "hand";
@@ -181,7 +181,12 @@ export const useEditor = create<EditorState>()((set, get) => ({
   },
 
   upsertJob(job) {
-    set((s) => ({ jobs: { ...s.jobs, [job.id]: job } }));
+    set((s) => {
+      const prev = s.jobs[job.id];
+      // Updates arrive over two paths (HTTP responses, live events) in any order: never move a job backwards.
+      if (prev && (JOB_STAGE_RANK[prev.status] > JOB_STAGE_RANK[job.status] || (isTerminal(prev.status) && isTerminal(job.status)))) return s;
+      return { jobs: { ...s.jobs, [job.id]: { ...prev, ...job } } };
+    });
   },
 
   addCommand(record) {
