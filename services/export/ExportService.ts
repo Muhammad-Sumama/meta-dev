@@ -6,6 +6,7 @@ import yazl from "yazl";
 import { buildAlpha } from "@/lib/compositing/alpha";
 import { computeCleanPlate, type PlateSample } from "@/lib/compositing/cleanPlate";
 import { applyEffect } from "@/lib/compositing/effects";
+import { refineAlpha, refineRadiusFor } from "@/lib/compositing/refine";
 import { AppError } from "@/lib/errors";
 import { decodeMask, maskForFrame } from "@/lib/mask/rle";
 import type { JobProgress } from "@/lib/schemas/job";
@@ -206,6 +207,11 @@ export async function runExport(project: Project, input: ExportJobInput, ctx: Ct
     keepAlpha: spec.alpha,
   };
 
+  // Edge refinement uses each frame as the guide, so it happens once the frame is decoded.
+  const refine = composite.refineEdges && tracks.length > 0;
+  const refineRadius = refineRadiusFor(mh, H, (composite.feather * H) / project.video.height);
+  const finalAlpha = (srcIdx: number, rgba: Uint8Array) => (refine ? refineAlpha(alphaFor(srcIdx), rgba, W, H, { radius: refineRadius }) : alphaFor(srcIdx));
+
   const report = (j: number) =>
     ctx.progress({
       stage: "rendering",
@@ -216,7 +222,7 @@ export async function runExport(project: Project, input: ExportJobInput, ctx: Ct
     });
 
   try {
-    if (spec.matte) {
+    if (spec.matte && !refine) {
       for (let j = 0; j < outCount; j++) {
         abortIfNeeded(ctx.signal);
         await write(alphaFor(srcIndexFor(j)));
@@ -237,8 +243,11 @@ export async function runExport(project: Project, input: ExportJobInput, ctx: Ct
       })) {
         if (j >= outCount) break;
         const rgba = new Uint8Array(frame.data.buffer, frame.data.byteOffset, frame.data.byteLength);
-        if (tracks.length) applyEffect(rgba, alphaFor(srcIndexFor(j)), W, H, effectParams);
-        await write(rgba);
+        if (spec.matte) await write(finalAlpha(srcIndexFor(j), rgba));
+        else {
+          if (tracks.length) applyEffect(rgba, finalAlpha(srcIndexFor(j), rgba), W, H, effectParams);
+          await write(rgba);
+        }
         report(j);
         j++;
         if (j % 4 === 0) await new Promise<void>((r) => setImmediate(r));

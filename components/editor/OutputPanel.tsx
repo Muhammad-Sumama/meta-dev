@@ -154,6 +154,14 @@ export function OutputPanel() {
         onChange={(v) => live.live({ feather: v })}
         onCommit={() => live.end("Feather")}
       />
+      <label className="flex items-center justify-between gap-2 text-[12.5px]" title="Moves mask edges onto the image's own edges (hair, fur, outlines). Applied to exports and to the preview when paused.">
+        <span>Refine edges</span>
+        <Switch
+          checked={composite.refineEdges}
+          onCheckedChange={(v) => updateComposite(v ? "Refine edges" : "Don't refine edges", { refineEdges: v })}
+          aria-label="Refine edges"
+        />
+      </label>
       <SliderRow
         label="Grow / shrink edge"
         value={composite.expand}

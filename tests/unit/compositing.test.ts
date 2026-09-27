@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { buildAlpha, growMask, upscaleMask } from "@/lib/compositing/alpha";
 import { computeCleanPlate } from "@/lib/compositing/cleanPlate";
 import { applyEffect, blurRGBA } from "@/lib/compositing/effects";
+import { refineAlpha, refineRadiusFor } from "@/lib/compositing/refine";
 import { encoderArgs, FORMAT_SPECS, outputDimensions } from "@/services/export/formats";
 
 const W = 8;
@@ -140,5 +141,95 @@ describe("export formats", () => {
     expect(encoderArgs(FORMAT_SPECS.mp4_h264, "low")).toContain("26");
     expect(FORMAT_SPECS.mp4_h264.alpha).toBe(false);
     expect(FORMAT_SPECS.png_zip.alpha).toBe(true);
+  });
+});
+
+describe("edge refinement (guided filter)", () => {
+  const W = 160;
+  const H = 96;
+  /** Dark background, bright object right of x = 97 (with mild noise), like a subject against a wall. */
+  function scene(edgeX = 97) {
+    const rgba = new Uint8Array(W * H * 4);
+    let seed = 7;
+    const noise = () => ((seed = (seed * 1103515245 + 12345) >>> 0) % 13) - 6;
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        const i = (y * W + x) * 4;
+        const on = x >= edgeX;
+        rgba[i] = (on ? 210 : 40) + noise();
+        rgba[i + 1] = (on ? 180 : 60) + noise();
+        rgba[i + 2] = (on ? 90 : 70) + noise();
+        rgba[i + 3] = 255;
+      }
+    }
+    return rgba;
+  }
+  const truthAt = (x: number) => (x >= 97 ? 1 : 0);
+
+  /** A coarse (1/4 resolution) mask whose edge is 1 coarse pixel off, upscaled and feathered like an export. */
+  function coarseAlpha() {
+    const mw = W / 4, mh = H / 4;
+    const mask = new Uint8Array(mw * mh);
+    for (let y = 0; y < mh; y++) for (let x = 0; x < mw; x++) mask[y * mw + x] = x >= 23 ? 1 : 0; // true edge ≈ 24.25
+    return { alpha: buildAlpha([mask], mw, mh, W, H, { expand: 0, feather: 2, sourceHeight: H }), mh };
+  }
+
+  const edgeError = (alpha: Uint8Array) => {
+    let err = 0;
+    let n = 0;
+    for (let y = 0; y < H; y++) for (let x = 85; x < 110; x++) {
+      err += Math.abs(alpha[y * W + x] / 255 - truthAt(x));
+      n++;
+    }
+    return err / n;
+  };
+
+  it("moves a misplaced, blurry mask edge onto the image edge", () => {
+    const { alpha, mh } = coarseAlpha();
+    const refined = refineAlpha(alpha, scene(), W, H, { radius: refineRadiusFor(mh, H) });
+    const row = H / 2;
+    const steepest = (a: Uint8Array) => {
+      let best = 0;
+      let at = -1;
+      for (let x = 80; x < 115; x++) {
+        const d = a[row * W + x + 1] - a[row * W + x];
+        if (d > best) [best, at] = [d, x + 1];
+      }
+      return { at, jump: best };
+    };
+    // The input ramps over ~15 px around x≈92; the refined matte jumps at the true edge.
+    expect(steepest(alpha).jump).toBeLessThan(30);
+    expect(steepest(refined)).toMatchObject({ at: 97 });
+    expect(steepest(refined).jump).toBeGreaterThan(120);
+    // Pixels the coarse mask wrongly claimed keep some alpha (a label error, not an edge error),
+    // but the error around the edge drops substantially.
+    expect(edgeError(refined)).toBeLessThan(edgeError(alpha) * 0.65);
+    for (let y = 0; y < H; y++) expect(refined[y * W + 115]).toBeGreaterThan(235);
+  });
+
+  it("doesn't invent edges where the image has none", () => {
+    const flat = scene(10_000); // uniform dark frame
+    const { alpha, mh } = coarseAlpha();
+    const refined = refineAlpha(alpha, flat, W, H, { radius: refineRadiusFor(mh, H) });
+    let maxDiff = 0;
+    for (let i = 0; i < alpha.length; i++) maxDiff = Math.max(maxDiff, Math.abs(refined[i] - alpha[i]));
+    expect(maxDiff).toBeLessThan(40); // just the smoothing of a soft ramp
+  });
+
+  it("only touches the subject's neighbourhood and handles empty mattes", () => {
+    expect(refineAlpha(new Uint8Array(W * H), scene(), W, H, { radius: 4 }).some((v) => v)).toBe(false);
+    const alpha = new Uint8Array(W * H);
+    for (let y = 40; y < 50; y++) for (let x = 120; x < 130; x++) alpha[y * W + x] = 255;
+    const refined = refineAlpha(alpha, scene(), W, H, { radius: 4 });
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      if (x < 120 - 8 || x > 129 + 8 || y < 40 - 8 || y > 49 + 8) expect(refined[y * W + x]).toBe(0);
+    }
+  });
+
+  it("scales its window with the mask-to-output ratio", () => {
+    expect(refineRadiusFor(288, 540)).toBe(8);
+    expect(refineRadiusFor(288, 1080)).toBe(15);
+    expect(refineRadiusFor(576, 1080)).toBe(8);
+    expect(refineRadiusFor(288, 540, 20)).toBe(20); // at least the feather
   });
 });

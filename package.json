@@ -18,7 +18,8 @@
     "eval:mock": "tsx scripts/eval-mock.ts",
     "worker": "tsx --conditions=react-server workers/main.ts",
     "db:migrate": "tsx --conditions=react-server scripts/db.ts migrate",
-    "db:import-files": "tsx --conditions=react-server scripts/db.ts import-files"
+    "db:import-files": "tsx --conditions=react-server scripts/db.ts import-files",
+    "eval:edges": "tsx scripts/eval-edges.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1141.0",

@@ -78,6 +78,8 @@ export const CompositeSchema = z.object({
   feather: z.number().min(0).max(40).default(2),
   /** Grow (+) / shrink (−) the mask edge, source pixels. */
   expand: z.number().min(-20).max(20).default(0),
+  /** Snap mask edges to the image (guided filter; see lib/compositing/refine.ts). */
+  refineEdges: z.boolean().default(true),
 });
 export type Composite = z.infer<typeof CompositeSchema>;
 

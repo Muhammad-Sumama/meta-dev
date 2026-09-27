@@ -62,7 +62,7 @@ so there is nothing else to install. In the demo, try the suggestions:
 | **AI commands** | “Track the person in the blue shirt”, “Isolate the dog and make the background transparent”, “Blur the background behind the woman on the left for the first 5 seconds”… Parsed into a schema-validated command (`isolate`, `select`, `track`, `mask`, `remove_background`, `blur`, `highlight`, `replace_background`, `remove_object`, `export_mask`), compiled into a plan, and run as a background job with live stage/progress. The structured JSON is shown in the history. |
 | **Selection** | Five methods: natural language, **click** (Alt-click / Subtract mode for negative points, Shift-click for a new object), **box**, **brush** and **eraser**. The segmentation backend receives frame + positive/negative points + box + mask + text. |
 | **Tracking** | One-click “Track through video” (bidirectional), “Re-track from this frame” after corrections, per-object lanes on the timeline with live processing bars. |
-| **Mask editing** | Brush / eraser with adjustable size, edits scoped explicitly to **this frame** or the **whole sequence**, add/subtract selection, feather, grow/shrink, overlay opacity, outline toggle. |
+| **Mask editing** | Brush / eraser with adjustable size, edits scoped explicitly to **this frame** or the **whole sequence**, add/subtract selection, feather, grow/shrink, **refine edges** (snaps mask edges to the image), overlay opacity, outline toggle. |
 | **Effects (live preview = export)** | Mask only, remove background (transparent), blur background (halo-free), blur object, highlight, replace background (color / green screen), remove object (clean-plate fill). |
 | **Timeline** | Ruler with adaptive timecodes, filmstrip thumbnails, playhead scrubbing, zoom, keyframe markers, selectable mask segments, AI processing state. |
 | **Export** | Video (MP4 H.264, WebM VP9, **WebM VP9 with alpha**, **ProRes 4444 with alpha**), mask (matte MP4 / PNG zip), RGBA PNG sequence (zip), project JSON. Resolution, FPS, quality, audio, range. “Processing frame 134 / 420” progress, cancel, download. Honest warnings (e.g. MP4 can't hold transparency). |
@@ -167,7 +167,8 @@ data/
 
 Masks are stored as row-major run-length encodings at the project's analysis
 resolution (≤ `ANALYSIS_MAX_SIZE`, aspect preserved) and upscaled with
-bilinear filtering + feathering at export.
+bilinear filtering + feathering at export, then (by default) refined against
+each frame with a guided filter so the edges follow the image.
 
 ## Requirements
 
@@ -256,6 +257,7 @@ Useful scripts:
 | `npm run db:import-files` | Copy file-store projects into PostgreSQL (re-runnable) |
 | `npm run demo:generate` | Re-render the demo clip and its ground-truth masks |
 | `npm run eval:mock` | Measure mock segmentation/tracking IoU on the demo clip |
+| `npm run eval:edges` | Measure export edge accuracy (with/without refinement) against full-resolution ground truth |
 | `npm run demo:hero` | Re-render the landing-page “after” clip through the API |
 
 ### Running workers with Redis
@@ -497,7 +499,7 @@ at scale it would move to the GPU workers (or FFmpeg filter graphs with
 ## Testing
 
 ```bash
-npm test                 # 226 Vitest tests: unit, components (jsdom), integration
+npm test                 # 231 Vitest tests: unit, components (jsdom), integration
 npm run test:e2e         # Playwright (set PLAYWRIGHT_CHROMIUM_EXECUTABLE to reuse a local Chromium)
 cd inference && pytest   # Python contract tests (no GPU needed)
 ```
@@ -540,6 +542,11 @@ cd inference && pytest   # Python contract tests (no GPU needed)
   deleting a project's objects, and an unreachable store → friendly error.
   The multi-process pipeline suite also runs with **separate disks** for the
   web and worker processes (Redis + PostgreSQL + S3 only).
+- **Edge refinement** — on synthetic frames (a misplaced, blurry mask edge
+  moves onto the image edge; no invented edges in flat regions; stays in the
+  subject's neighbourhood) and a regression test on the demo clip against
+  full-resolution ground truth (every subject improves, with ground-truth
+  and with tracked masks).
 - **SAM 2 server pool** — routing (stable across processes, spread across
   servers), failover when a server is down or loading and back after the
   cooldown, re-creating sessions a restarted server forgot, pool health; and
@@ -599,8 +606,15 @@ cd inference && pytest   # Python contract tests (no GPU needed)
 - Mock inference is classical computer vision, not a neural network (see the
   table above). Production-quality masks need SAM 2.
 - Masks are stored at analysis resolution (default 512 px) and upscaled with
-  feathering; hair-level detail needs a higher `ANALYSIS_MAX_SIZE` with SAM 2
-  (and a matting model — see roadmap).
+  feathering. **Refine edges** (on by default) then snaps the upscaled edges
+  to the frame with a colour guided filter — on the demo clip it cuts the
+  alpha error near the true boundary by ~27% and raises full-resolution IoU
+  for every subject (`npm run eval:edges`) — but it can't recover detail the
+  mask never had (a pixel wrongly labelled at analysis resolution keeps some
+  alpha), and where the subject's colour matches the background it leaves
+  the edge as it was. Hair-level mattes need a higher `ANALYSIS_MAX_SIZE` with
+  SAM 2 and a matting model (roadmap). The live preview applies refinement on
+  paused frames only.
 - Variable-frame-rate video (typical of phones) is placed on a constant grid
   at its average frame rate: frame *i* is the picture on screen at
   (*i* + ½) / fps, which is what the browser shows, so masks stay aligned.
@@ -617,10 +631,12 @@ cd inference && pytest   # Python contract tests (no GPU needed)
 
 1. **Browser-based AI rotoscoping** — this MVP: natural language + clicks →
    SAM 2 masks → tracking → export, with a mock mode for development.
-2. **Cloud GPU inference** — autoscaled SAM 2 workers, Redis/BullMQ jobs,
-   object storage, Postgres, SSE progress, matting refinement for hair, video
-   inpainting (e.g. ProPainter) for object removal, WebCodecs frame-accurate
-   preview.
+2. **Cloud GPU inference** — *in progress.* Done: Redis/BullMQ jobs with
+   separate worker processes, SSE progress, PostgreSQL, S3 object storage, a
+   SAM 2 server pool with failover, Docker Compose, guided-filter edge
+   refinement. Next: autoscaling the GPU pool, a matting network for hair,
+   video inpainting (e.g. ProPainter) for object removal, WebCodecs
+   frame-accurate preview, signed URLs / CDN for media.
 3. **Real-time collaboration** — accounts, shared projects, presence, comments
    on frames, CRDT-based document sync (the document/history model is already
    snapshot-based and serializable).

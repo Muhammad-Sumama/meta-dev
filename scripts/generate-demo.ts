@@ -386,9 +386,42 @@ function writeGroundTruth() {
   console.log(`Wrote ${file}`);
 }
 
+/**
+ * Full-resolution visible masks for a few frames (tests/fixtures/street-scene-gt-full.json),
+ * for measuring edge accuracy of the upscaled/refined export alpha.
+ */
+const GT_FULL_STEP = 45;
+
+function writeFullResGroundTruth() {
+  const c = createCanvas(WIDTH, HEIGHT);
+  const ctx = c.getContext("2d");
+  const out: Record<string, Record<string, number[]>> = Object.fromEntries(SUBJECTS.map((s) => [s.id, {}]));
+  for (let f = 0; f < FRAMES; f += GT_FULL_STEP) {
+    const alphas = SUBJECTS.map((subj) => {
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.clearRect(0, 0, WIDTH, HEIGHT);
+      subj.draw(ctx, f);
+      const d = ctx.getImageData(0, 0, WIDTH, HEIGHT).data;
+      const m = new Uint8Array(WIDTH * HEIGHT);
+      for (let i = 0; i < m.length; i++) m[i] = d[i * 4 + 3] > 128 ? 1 : 0;
+      return m;
+    });
+    SUBJECTS.forEach((subj, k) => {
+      const visible = alphas[k].slice();
+      for (let j = k + 1; j < alphas.length; j++) for (let i = 0; i < visible.length; i++) if (alphas[j][i]) visible[i] = 0;
+      out[subj.id][f] = encodeRle(visible);
+    });
+  }
+  const file = path.join(process.cwd(), "tests", "fixtures", "street-scene-gt-full.json");
+  writeFileSync(file, JSON.stringify({ width: WIDTH, height: HEIGHT, fps: FPS, frameCount: FRAMES, step: GT_FULL_STEP, subjects: out }));
+  console.log(`Wrote ${file}`);
+}
+
 // ---------------------------------------------------------------------------
 async function main() {
+  if (process.argv.includes("--gt-full")) return writeFullResGroundTruth();
   writeGroundTruth();
+  writeFullResGroundTruth();
   if (process.argv.includes("--gt-only")) return;
 
   const ffmpeg = process.env.FFMPEG_PATH || (ffmpegStatic as unknown as string);
