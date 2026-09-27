@@ -26,6 +26,7 @@ switches to real SAM 2 / Llama inference by changing two environment variables.
 - [Installation](#installation)
 - [Environment variables](#environment-variables)
 - [Running locally](#running-locally)
+- [Deploying with Docker Compose](#deploying-with-docker-compose)
 - [Running with mock AI](#running-with-mock-ai) — **where the mock ends and real AI begins**
 - [Connecting Llama](#connecting-llama)
 - [Connecting SAM 2](#connecting-sam-2)
@@ -224,7 +225,7 @@ Nothing is exposed to the browser except non-secret status via `/api/health`.
 | `LLAMA_TIMEOUT_MS` | `20000` | Per-request timeout |
 | `LLAMA_FALLBACK_TO_RULES` | `true` | Fall back to the rule parser (flagged in the UI) if Llama fails |
 | `SEGMENTATION_PROVIDER` | `mock` | `mock` or `sam2` |
-| `SAM2_SERVICE_URL` | `http://localhost:8008` | Inference server |
+| `SAM2_SERVICE_URL` | `http://localhost:8008` | Inference server, or a comma-separated pool |
 | `SAM2_API_KEY` | – | Must match the server's `INFERENCE_API_KEY` |
 | `SAM2_TIMEOUT_MS` | `300000` | Per-request timeout |
 | `SAM2_SHARED_STORAGE` | `false` | Send file paths instead of uploading (shared disk) |
@@ -410,12 +411,40 @@ SAM2_API_KEY=change-me
 ANALYSIS_MAX_SIZE=1024
 ```
 
+**Several GPU servers:** list them all —
+`SAM2_SERVICE_URL=http://gpu-a:8008,http://gpu-b:8008`. Each video's session
+stays on one server (chosen by rendezvous hashing, so every web and worker
+process agrees without coordination), different videos spread across the
+pool, and if a server is unreachable or still loading, its videos move to the
+next one automatically (the video is sent there once). A server that
+restarted and lost its sessions gets them back on the next request.
+
 The status appears in **Settings** and in the header badge. The HTTP
 contract (sessions, `/segment`, NDJSON `/propagate`, `/ground`) is documented
 in `inference/README.md` and covered by tests on both sides
 (`tests/unit/sam2-provider.test.ts`, `inference/tests/test_api.py`). You can
 exercise the full web-app → Python path without a GPU using the fake backend:
 `uvicorn tests.fake_server:app --port 8008` in `inference/`.
+
+## Deploying with Docker Compose
+
+`docker-compose.yml` runs the distributed setup on one machine: web, worker,
+Redis, PostgreSQL and MinIO (S3 API), plus the SAM 2 inference server with
+the `gpu` profile.
+
+```bash
+docker compose up --build                       # mock AI → http://localhost:3000
+docker compose up --build --scale worker=3      # more workers
+docker compose --profile gpu up --build         # + SAM 2 (NVIDIA Container Toolkit)
+```
+
+Put overrides in a `.env` file next to it (`SEGMENTATION_PROVIDER=sam2`,
+`INFERENCE_API_KEY`, `LLM_PROVIDER=llama`, `LLAMA_BASE_URL`,
+`POSTGRES_PASSWORD`, `MINIO_ROOT_USER`/`MINIO_ROOT_PASSWORD`, `PORT`). Web and
+worker containers have separate cache volumes and share only Redis,
+PostgreSQL and MinIO, so moving them to separate machines means pointing the
+same variables at shared services. The root `Dockerfile` builds one image for
+both (`npx next start` or `npm run worker`).
 
 ## FFmpeg setup
 
@@ -457,7 +486,7 @@ seams where it will be split:
 | In-process `JobQueue` + JSON job files (default) | **Available:** `JOB_BACKEND=redis` — BullMQ on Redis, `npm run worker` processes | `services/jobs/types.ts` (`JobQueuePort`; handlers only see `signal` + `progress`) |
 | `FileSystemProjectRepository` (default) | **Available:** `PROJECT_STORE=postgres` — projects and tracks in PostgreSQL | `services/projects/ProjectRepository.ts` |
 | Local `data/` media (default) | **Available:** `MEDIA_STORE=s3` — S3 or compatible storage, per-machine cache, range streaming. Next: signed URLs/CDN for previews | `services/storage/objectStore.ts`, `services/storage/projectMedia.ts` |
-| Mock / single inference server | Autoscaled GPU pool behind a load balancer, session affinity by video | `services/sam2/SAM2Provider.ts` contract |
+| Mock / single inference server | **Available:** a pool of inference servers with per-video affinity and failover. Next: autoscaling the pool | `services/sam2/SAM2Provider.ts` contract |
 | Job status polling | **Available:** server-sent events per project (works across worker processes via Redis pub/sub), polling fallback | `services/jobs/events.ts`, `hooks/useJobUpdates.ts` |
 | In-memory rate limits | Redis rate limiting at the edge | `lib/server/api.ts` |
 
@@ -468,7 +497,7 @@ at scale it would move to the GPU workers (or FFmpeg filter graphs with
 ## Testing
 
 ```bash
-npm test                 # 219 Vitest tests: unit, components (jsdom), integration
+npm test                 # 226 Vitest tests: unit, components (jsdom), integration
 npm run test:e2e         # Playwright (set PLAYWRIGHT_CHROMIUM_EXECUTABLE to reuse a local Chromium)
 cd inference && pytest   # Python contract tests (no GPU needed)
 ```
@@ -511,6 +540,11 @@ cd inference && pytest   # Python contract tests (no GPU needed)
   deleting a project's objects, and an unreachable store → friendly error.
   The multi-process pipeline suite also runs with **separate disks** for the
   web and worker processes (Redis + PostgreSQL + S3 only).
+- **SAM 2 server pool** — routing (stable across processes, spread across
+  servers), failover when a server is down or loading and back after the
+  cooldown, re-creating sessions a restarted server forgot, pool health; and
+  against two real inference servers (fake backend), killing the one that
+  owns a session mid-way.
 - **Job queue on Redis** (skipped if `redis-server` isn't installed) — a
   throwaway Redis per run: cross-process progress/results, cancelling queued
   and running jobs, graceful shutdown (including handlers that ignore the

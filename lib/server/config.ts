@@ -64,7 +64,11 @@ const EnvSchema = z.object({
   LLAMA_FALLBACK_TO_RULES: bool.default(true),
 
   SEGMENTATION_PROVIDER: z.enum(["mock", "sam2"]).default("mock"),
-  SAM2_SERVICE_URL: z.string().url().default("http://localhost:8008"),
+  /** One inference server, or a comma-separated pool (videos stick to one server, with failover). */
+  SAM2_SERVICE_URL: z
+    .string()
+    .refine((v) => v.split(",").every((u) => URL.canParse(u.trim()) && /^https?:\/\//.test(u.trim())), "comma-separated http(s) URLs")
+    .default("http://localhost:8008"),
   SAM2_API_KEY: z.string().optional(),
   SAM2_TIMEOUT_MS: z.coerce.number().int().min(1000).max(3_600_000).default(300_000),
   SAM2_SHARED_STORAGE: bool.default(false),
