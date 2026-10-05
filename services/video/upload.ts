@@ -18,6 +18,7 @@ import {
 import { getProjectRepository } from "../projects";
 import { assertDiskSpace, ensureDir } from "../storage/fs";
 import { mediaPath, projectDir, tmpDir } from "../storage/paths";
+import { publish } from "../storage/projectMedia";
 import { resolveBinaries } from "./ffmpeg";
 import { fitWithin } from "./ingest";
 import { isBrowserPlayable, probeVideo } from "./probe";
@@ -184,9 +185,12 @@ export async function createProjectFromFile(
       await fs.copyFile(file.path, dest);
       await fs.rm(file.path, { force: true });
     });
+    // Durable before any job can ask for it (MEDIA_STORE=s3; no-op locally).
+    await publish(id, `media/${fileName}`, project.video.mimeType);
   } catch (err) {
+    await repo.delete(id).catch(() => undefined);
     await fs.rm(projectDir(id), { recursive: true, force: true });
-    throw new AppError("UPLOAD_FAILED", { cause: err });
+    throw err instanceof AppError ? err : new AppError("UPLOAD_FAILED", { cause: err });
   }
   return project;
 }

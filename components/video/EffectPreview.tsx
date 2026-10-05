@@ -2,6 +2,7 @@
 
 import { useEffect, useRef } from "react";
 import { growMask } from "@/lib/compositing/alpha";
+import { refineAlpha, refineRadiusFor } from "@/lib/compositing/refine";
 import { paintAlpha, trackMaskAt } from "@/lib/client/maskRender";
 import { useCleanPlate } from "@/hooks/useCleanPlate";
 import { useEditor } from "@/stores/editor";
@@ -71,12 +72,27 @@ function drawEffectFrame(canvas: HTMLCanvasElement, v: HTMLVideoElement, layersR
 
   // Feathered matte at preview resolution.
   const featherPx = (comp.feather * H) / p.video.height + H / mh / 2;
-  const mctx = L.mask.getContext("2d")!;
+  const mctx = L.mask.getContext("2d", { willReadFrequently: true })!;
   mctx.clearRect(0, 0, W, H);
   mctx.filter = featherPx >= 0.5 ? `blur(${featherPx.toFixed(1)}px)` : "none";
   mctx.imageSmoothingEnabled = true;
   mctx.drawImage(L.alpha, 0, 0, W, H);
   mctx.filter = "none";
+
+  // Edge refinement as in the export, on paused frames (too heavy to run at playback rate).
+  if (comp.refineEdges && v.paused && alphaSrc) {
+    const tctx = L.tmp.getContext("2d", { willReadFrequently: true })!;
+    tctx.globalCompositeOperation = "source-over";
+    tctx.clearRect(0, 0, W, H);
+    tctx.drawImage(v, 0, 0, W, H);
+    const pixels = tctx.getImageData(0, 0, W, H).data;
+    const matte = mctx.getImageData(0, 0, W, H);
+    const alpha = new Uint8Array(W * H);
+    for (let i = 0; i < alpha.length; i++) alpha[i] = matte.data[i * 4 + 3];
+    const refined = refineAlpha(alpha, pixels, W, H, { radius: refineRadiusFor(mh, H, (comp.feather * H) / p.video.height) });
+    for (let i = 0; i < refined.length; i++) matte.data[i * 4 + 3] = refined[i];
+    mctx.putImageData(matte, 0, 0);
+  }
 
   // Subject layer = video masked by the matte.
   const sctx = L.subject.getContext("2d")!;
@@ -88,7 +104,7 @@ function drawEffectFrame(canvas: HTMLCanvasElement, v: HTMLVideoElement, layersR
   sctx.globalCompositeOperation = "source-over";
 
   const maskedLayer = (source: CanvasImageSource, filter = "none") => {
-    const tctx = L.tmp.getContext("2d")!;
+    const tctx = L.tmp.getContext("2d", { willReadFrequently: true })!;
     tctx.globalCompositeOperation = "source-over";
     tctx.clearRect(0, 0, W, H);
     tctx.filter = filter;

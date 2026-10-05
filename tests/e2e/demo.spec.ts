@@ -9,14 +9,18 @@ test("landing page explains the product and its independence", async ({ page }) 
 });
 
 test("demo: AI command → tracking → effect preview → export", async ({ page }) => {
+  const requests: string[] = [];
+  page.on("request", (r) => requests.push(new URL(r.url()).pathname));
   await page.goto("/");
   await page.getByRole("button", { name: "Try Demo" }).first().click();
   await page.waitForURL(/\/editor\/prj_/);
   await expect(page.getByText("Mock AI")).toBeVisible();
 
-  // Natural-language command via suggestion.
+  // Natural-language command via suggestion; progress arrives over the event stream, not polling.
   await page.getByRole("button", { name: "Track the red car" }).click();
   await expect(page.getByRole("button", { name: /Red car: AI tracked/ })).toBeVisible({ timeout: 90_000 });
+  expect(requests.filter((p) => /\/api\/projects\/prj_\w+\/events$/.test(p)).length).toBeGreaterThan(0);
+  expect(requests.filter((p) => p.startsWith("/api/jobs/"))).toEqual([]);
   await expect(page.getByText("Show structured command")).toBeVisible();
 
   // Effect on the selected object.

@@ -143,3 +143,109 @@ describe("detection targeting", () => {
     expect(Math.max(...frames)).toBeLessThan(300);
   });
 });
+
+describe("SAM2Provider server pool", () => {
+  const SERVERS = ["http://gpu-a:8008", "http://gpu-b:8008", "http://gpu-c:8008"];
+  const src = session.source;
+
+  /** A fake pool: each server knows some sessions; `down` servers refuse connections. */
+  function pool(opts: { down?: Set<string>; loading?: Set<string>; clock?: { t: number }; family?: "sam2" | "sam3" } = {}) {
+    const sessions = new Map<string, Set<string>>(SERVERS.map((s) => [s, new Set()]));
+    const calls: string[] = [];
+    const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input));
+      const server = `${url.protocol}//${url.host}`;
+      const method = init?.method ?? "GET";
+      calls.push(`${method} ${server}${url.pathname}`);
+      if (opts.down?.has(server)) throw new TypeError("fetch failed");
+      if (opts.loading?.has(server)) return json({ status: "loading" }, url.pathname === "/health" ? 200 : 503);
+      if (url.pathname === "/health") return json({ status: "ok", model: "sam2", device: "cuda", grounding: true });
+      const known = sessions.get(server)!;
+      const m = /^\/v1\/sessions(?:\/([^/]+))?(?:\/(\w+))?$/.exec(url.pathname)!;
+      if (method === "POST" && !m[1]) {
+        known.add(JSON.parse(String(init?.body)).session_id);
+        return json({ ok: true });
+      }
+      if (!known.has(m[1])) return json({ detail: "unknown session" }, 404);
+      if (m[2] === "segment") return json({ frame_index: 0, score: 0.9, mask: { counts: encodeMask(mask([server.endsWith("a:8008") ? 1 : server.endsWith("b:8008") ? 2 : 3])), size: [H, W] } });
+      return json({});
+    }) as unknown as typeof fetch;
+    const clock = opts.clock ?? { t: 0 };
+    const provider = new SAM2Provider({ baseUrl: SERVERS, timeoutMs: 2000, sharedStorage: true, fetchImpl, cooldownMs: 10_000, now: () => clock.t, family: opts.family });
+    return { provider, sessions, calls, clock };
+  }
+
+  it("keeps each video on one server, spreading videos across the pool", () => {
+    const { provider } = pool();
+    const other = pool().provider; // another process ranks identically
+    const counts = new Map<string, number>();
+    for (let i = 0; i < 60; i++) {
+      const id = `prj_${String(i).padStart(12, "0")}-v1`;
+      expect(provider.serverFor(id)).toBe(other.serverFor(id));
+      counts.set(provider.serverFor(id), (counts.get(provider.serverFor(id)) ?? 0) + 1);
+    }
+    expect(counts.size).toBe(3);
+    for (const n of counts.values()) expect(n).toBeGreaterThan(8);
+  });
+
+  it("moves a video to the next server when its server is down, then back after the cooldown", async () => {
+    const primary = pool().provider.rankServers(session.id)[0];
+    const down = new Set([primary]);
+    const { provider, sessions, clock } = pool({ down });
+    const s = await provider.initializeVideo(src);
+    const backup = provider.rankServers(session.id)[1];
+    expect(sessions.get(backup)!.has(s.id)).toBe(true);
+    await expect(provider.segmentFrame(s, { frameIndex: 0, points: [{ x: 0.5, y: 0.5, label: 1 }] })).resolves.toMatchObject({ score: 0.9 });
+    expect(provider.serverFor(s.id)).toBe(backup);
+
+    down.clear();
+    clock.t += 10_001;
+    expect(provider.serverFor(s.id)).toBe(primary);
+    // The primary doesn't have the session yet: it's created there on first use.
+    await expect(provider.segmentFrame(s, { frameIndex: 0, points: [{ x: 0.5, y: 0.5, label: 1 }] })).resolves.toMatchObject({ score: 0.9 });
+    expect(sessions.get(primary)!.has(s.id)).toBe(true);
+  });
+
+  it("re-creates a session on a server that forgot it (restart) and retries once", async () => {
+    const { provider, sessions, calls } = pool();
+    const s = await provider.initializeVideo(src);
+    const server = provider.serverFor(s.id);
+    sessions.get(server)!.clear(); // server restarted
+    calls.length = 0;
+    await expect(provider.segmentFrame(s, { frameIndex: 0, points: [{ x: 0.5, y: 0.5, label: 1 }] })).resolves.toMatchObject({ score: 0.9 });
+    expect(calls).toEqual([
+      `POST ${server}/v1/sessions/${s.id}/segment`,
+      `GET ${server}/v1/sessions/${s.id}`,
+      `POST ${server}/v1/sessions`,
+      `POST ${server}/v1/sessions/${s.id}/segment`,
+    ]);
+  });
+
+  it("fails over when a server is still loading (503)", async () => {
+    const primary = pool().provider.rankServers(session.id)[0];
+    const { provider } = pool({ loading: new Set([primary]) });
+    const s = await provider.initializeVideo(src);
+    expect(provider.serverFor(s.id)).not.toBe(primary);
+  });
+
+  it("reports a friendly error when every server is down", async () => {
+    const { provider } = pool({ down: new Set(SERVERS) });
+    await expect(provider.initializeVideo(src)).rejects.toMatchObject({ code: "MODEL_UNAVAILABLE" });
+    await expect(provider.health()).resolves.toMatchObject({ status: "unavailable", message: "Can't reach any SAM 2 server." });
+  });
+
+  it("labels a SAM 3 deployment as SAM 3", async () => {
+    const { provider } = pool({ family: "sam3" });
+    expect(provider.info).toMatchObject({ id: "sam3", name: "SAM 3", kind: "production" });
+    expect(await provider.health()).toMatchObject({ status: "ready", message: expect.stringMatching(/^3 SAM 3 servers ready/) });
+    const down = pool({ family: "sam3", down: new Set(SERVERS) }).provider;
+    await expect(down.health()).resolves.toMatchObject({ message: "Can't reach any SAM 3 server." });
+  });
+
+  it("reports pool health", async () => {
+    expect(await pool().provider.health()).toMatchObject({ status: "ready", details: { serversReady: 3, servers: 3, grounding: true } });
+    const partial = await pool({ down: new Set([SERVERS[1]]) }).provider.health();
+    expect(partial).toMatchObject({ status: "degraded", details: { serversReady: 2, servers: 3 } });
+    expect(JSON.stringify(partial)).not.toContain("gpu-"); // no internal hostnames in the browser
+  });
+});

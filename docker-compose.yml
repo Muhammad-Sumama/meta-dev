@@ -1,0 +1,142 @@
+# The distributed stack on one machine:
+#
+#   docker compose up --build                      # mock AI, http://localhost:3000
+#   docker compose --profile gpu up --build        # + SAM 2 inference server (NVIDIA GPU)
+#   docker compose up --build --scale worker=3     # more workers
+#
+# web and worker share nothing but Redis (jobs), PostgreSQL (projects) and
+# MinIO (media, S3 API) — each has its own cache volume — so the same setup
+# works with them on separate machines. For SAM 3 set SEGMENTATION_PROVIDER=sam3 and
+# HF_TOKEN in .env (and INFERENCE_API_KEY); for SAM 2 set SEGMENTATION_PROVIDER=sam2 and
+# MODEL_FAMILY=sam2. For Llama set LLM_PROVIDER=llama and LLAMA_BASE_URL.
+name: opensam
+
+x-app: &app
+  build: .
+  restart: unless-stopped
+  environment: &app-env
+    DATA_DIR: /data
+    MIN_FREE_DISK_MB: "512"
+    JOB_BACKEND: redis
+    REDIS_URL: redis://redis:6379
+    PROJECT_STORE: postgres
+    DATABASE_URL: postgres://opensam:${POSTGRES_PASSWORD:-opensam}@postgres:5432/opensam
+    MEDIA_STORE: s3
+    S3_BUCKET: opensam
+    S3_ENDPOINT: http://minio:9000
+    S3_FORCE_PATH_STYLE: "true"
+    S3_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-opensam}
+    S3_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-opensam-secret}
+    SEGMENTATION_PROVIDER: ${SEGMENTATION_PROVIDER:-mock}
+    SAM2_SERVICE_URL: ${SAM2_SERVICE_URL:-http://inference:8008}
+    SAM2_API_KEY: ${INFERENCE_API_KEY:-}
+    LLM_PROVIDER: ${LLM_PROVIDER:-mock}
+    LLAMA_BASE_URL: ${LLAMA_BASE_URL:-http://host.docker.internal:11434/v1}
+    LLAMA_MODEL: ${LLAMA_MODEL:-llama3.1:8b}
+    LLAMA_API_KEY: ${LLAMA_API_KEY:-}
+  depends_on:
+    redis:
+      condition: service_healthy
+    postgres:
+      condition: service_healthy
+    minio-setup:
+      condition: service_completed_successfully
+
+services:
+  web:
+    <<: *app
+    ports:
+      - "${PORT:-3000}:3000"
+    volumes:
+      - web-cache:/data
+
+  worker:
+    <<: *app
+    command: ["npm", "run", "worker"]
+    environment:
+      <<: *app-env
+      JOB_CONCURRENCY: "2"
+    volumes:
+      - worker-cache:/data
+    stop_grace_period: 40s
+    healthcheck:
+      disable: true
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 20
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: opensam
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-opensam}
+      POSTGRES_DB: opensam
+    volumes:
+      - postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U opensam -d opensam"]
+      interval: 5s
+      retries: 20
+
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-opensam}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-opensam-secret}
+    volumes:
+      - minio:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      retries: 20
+
+  # Creates the bucket once, then exits.
+  minio-setup:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-opensam}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-opensam-secret}
+    entrypoint:
+      - sh
+      - -c
+      - mc alias set local http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD" && mc mb --ignore-existing local/opensam
+
+  inference:
+    profiles: ["gpu"]
+    build: ./inference
+    restart: unless-stopped
+    environment:
+      INFERENCE_API_KEY: ${INFERENCE_API_KEY:-}
+      MODEL_FAMILY: ${MODEL_FAMILY:-sam3}
+      HF_TOKEN: ${HF_TOKEN:-}
+    volumes:
+      - hf-cache:/root/.cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+volumes:
+  web-cache:
+  worker-cache:
+  redis:
+  postgres:
+  minio:
+  hf-cache:

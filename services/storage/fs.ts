@@ -63,6 +63,46 @@ export async function assertDiskSpace(dir: string, extraMb = 0) {
   }
 }
 
+/**
+ * Cross-process exclusive lock: an O_EXCL lock file. Web servers and worker
+ * processes sharing a data directory hold it around read-modify-write of
+ * project.json. A lock older than `staleMs` belongs to a crashed process and
+ * is broken.
+ */
+export async function withFileLock<T>(
+  lockFile: string,
+  fn: () => Promise<T>,
+  { staleMs = 30_000, timeoutMs = 15_000 }: { staleMs?: number; timeoutMs?: number } = {},
+): Promise<T> {
+  const deadline = Date.now() + timeoutMs;
+  let delay = 4;
+  for (;;) {
+    try {
+      const handle = await fs.open(lockFile, "wx");
+      await handle.writeFile(`${process.pid} ${new Date().toISOString()}\n`);
+      await handle.close();
+      break;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+      const stat = await fs.stat(lockFile).catch(() => null);
+      if (stat && Date.now() - stat.mtimeMs > staleMs) {
+        await fs.rm(lockFile, { force: true });
+        continue;
+      }
+      if (Date.now() > deadline) {
+        throw new AppError("CONFLICT", { message: "This project is busy.", hint: "Try again in a moment." });
+      }
+      await new Promise((r) => setTimeout(r, delay + Math.random() * delay));
+      delay = Math.min(100, delay * 2);
+    }
+  }
+  try {
+    return await fn();
+  } finally {
+    await fs.rm(lockFile, { force: true });
+  }
+}
+
 /** Serializes async operations per key (e.g. read-modify-write of project.json). */
 export class KeyedMutex {
   private tails = new Map<string, Promise<unknown>>();

@@ -5,7 +5,7 @@ isolate, and OpenSAM Studio segments and tracks it for you — then exports a
 matte, a transparent cutout, or a finished video.
 
 > OpenSAM Studio is an independent creative tool built around open AI
-> technologies, including SAM 2 and Llama. It is **not** affiliated with,
+> technologies, including SAM 3, SAM 2 and Llama. It is **not** affiliated with,
 > endorsed by, or sponsored by Meta Platforms, Inc.
 
 ```
@@ -13,7 +13,7 @@ Video  →  natural language  →  object segmentation  →  tracking  →  mask
 ```
 
 It runs end-to-end on a laptop with no GPU and no API keys (mock AI mode), and
-switches to real SAM 2 / Llama inference by changing two environment variables.
+switches to real SAM 3 (or SAM 2) / Llama inference by changing two environment variables.
 
 ---
 
@@ -26,9 +26,10 @@ switches to real SAM 2 / Llama inference by changing two environment variables.
 - [Installation](#installation)
 - [Environment variables](#environment-variables)
 - [Running locally](#running-locally)
+- [Deploying with Docker Compose](#deploying-with-docker-compose)
 - [Running with mock AI](#running-with-mock-ai) — **where the mock ends and real AI begins**
 - [Connecting Llama](#connecting-llama)
-- [Connecting SAM 2](#connecting-sam-2)
+- [Connecting SAM 3 or SAM 2](#connecting-sam-3-or-sam-2)
 - [FFmpeg setup](#ffmpeg-setup)
 - [GPU requirements](#gpu-requirements)
 - [Production architecture](#production-architecture)
@@ -61,7 +62,7 @@ so there is nothing else to install. In the demo, try the suggestions:
 | **AI commands** | “Track the person in the blue shirt”, “Isolate the dog and make the background transparent”, “Blur the background behind the woman on the left for the first 5 seconds”… Parsed into a schema-validated command (`isolate`, `select`, `track`, `mask`, `remove_background`, `blur`, `highlight`, `replace_background`, `remove_object`, `export_mask`), compiled into a plan, and run as a background job with live stage/progress. The structured JSON is shown in the history. |
 | **Selection** | Five methods: natural language, **click** (Alt-click / Subtract mode for negative points, Shift-click for a new object), **box**, **brush** and **eraser**. The segmentation backend receives frame + positive/negative points + box + mask + text. |
 | **Tracking** | One-click “Track through video” (bidirectional), “Re-track from this frame” after corrections, per-object lanes on the timeline with live processing bars. |
-| **Mask editing** | Brush / eraser with adjustable size, edits scoped explicitly to **this frame** or the **whole sequence**, add/subtract selection, feather, grow/shrink, overlay opacity, outline toggle. |
+| **Mask editing** | Brush / eraser with adjustable size, edits scoped explicitly to **this frame** or the **whole sequence**, add/subtract selection, feather, grow/shrink, **refine edges** (snaps mask edges to the image), overlay opacity, outline toggle. |
 | **Effects (live preview = export)** | Mask only, remove background (transparent), blur background (halo-free), blur object, highlight, replace background (color / green screen), remove object (clean-plate fill). |
 | **Timeline** | Ruler with adaptive timecodes, filmstrip thumbnails, playhead scrubbing, zoom, keyframe markers, selectable mask segments, AI processing state. |
 | **Export** | Video (MP4 H.264, WebM VP9, **WebM VP9 with alpha**, **ProRes 4444 with alpha**), mask (matte MP4 / PNG zip), RGBA PNG sequence (zip), project JSON. Resolution, FPS, quality, audio, range. “Processing frame 134 / 420” progress, cancel, download. Honest warnings (e.g. MP4 can't hold transparency). |
@@ -93,12 +94,14 @@ so there is nothing else to install. In the demo, try the suggestions:
 │             └─ InteractionLayer (click / box / brush / eraser)    │
 │  Timeline · AI panel · Objects · Output · Export/Settings dialogs │
 └───────────────┬──────────────────────────────────────────────────┘
-                │ JSON / streamed uploads / range requests
+                │ JSON · streamed uploads · range requests · SSE
 ┌───────────────▼──────────── Next.js route handlers (app/api) ────┐
 │ validation (zod) · rate limits · friendly errors                  │
 │ ProjectService (use-cases)                                        │
 │   ├─ ProjectRepository ── FileSystemProjectRepository (data/)     │
-│   ├─ JobQueue ── queued → processing → completed|failed|cancelled │
+│   ├─ JobQueuePort ── queued → processing → completed|failed|…    │
+│   │    ├─ JobQueue (in-process, default)                          │
+│   │    ├─ RedisJobQueue (BullMQ) ──► `npm run worker` processes   │
 │   │    └─ workers/: ingest · segmentation (“AI worker”) · export  │
 │   ├─ LlamaService ── LanguageProvider                             │
 │   │        ├─ LlamaProvider   (OpenAI-compatible HTTP)            │
@@ -114,7 +117,11 @@ so there is nothing else to install. In the demo, try the suggestions:
 a separate Python service (`inference/`) behind an HTTP contract. Everything
 else — upload, jobs, compositing, export — is TypeScript in one Next.js app,
 which keeps local setup to `npm install`. Long work (tracking, exports,
-transcodes) runs as jobs so the UI never blocks; the browser polls job status.
+transcodes) runs as jobs so the UI never blocks; progress streams to the
+browser as server-sent events (`/api/projects/:id/events`), with polling as a
+fallback.
+Jobs run inside the web server by default, or in separate worker processes on
+other machines with `JOB_BACKEND=redis`.
 
 ### Project layout
 
@@ -122,7 +129,7 @@ transcodes) runs as jobs so the UI never blocks; the browser polls job status.
 app/                     Next.js App Router
   page.tsx               landing page
   editor/                project picker + editor route
-  api/                   REST API (projects, media, segment, track, commands, exports, jobs, health)
+  api/                   REST API (projects, media, segment, track, commands, exports, jobs, events (SSE), health)
 components/
   editor/ video/ timeline/ ai/ export/ landing/ ui/ (shadcn-style primitives on Radix)
 services/
@@ -131,9 +138,9 @@ services/
   sam2/                  SAM2Service, SAM2Provider (HTTP client), detection targeting
   video/                 safe FFmpeg wrapper, ffprobe, frame streaming, ingest (poster/filmstrip/proxies), uploads
   export/                ExportService, format specs
-  jobs/                  JobQueue (+ file store, runtime singleton)
-  projects/ storage/     repository + path safety
-workers/                 job handlers: ingest, segmentation, export
+  jobs/                  JobQueuePort: in-process JobQueue (+ file store), redis/RedisJobQueue (BullMQ), runtime
+  projects/ storage/     repository (files | postgres/), import between stores; path safety, object store (s3/), project files
+workers/                 job handlers: ingest, segmentation, export; main.ts = worker process
 lib/
   schemas/               zod schemas: command, project, job, API requests
   compositing/           pure alpha/effect/clean-plate code shared by preview and export
@@ -160,7 +167,8 @@ data/
 
 Masks are stored as row-major run-length encodings at the project's analysis
 resolution (≤ `ANALYSIS_MAX_SIZE`, aspect preserved) and upscaled with
-bilinear filtering + feathering at export.
+bilinear filtering + feathering at export, then (by default) refined against
+each frame with a guided filter so the edges follow the image.
 
 ## Requirements
 
@@ -191,16 +199,34 @@ Nothing is exposed to the browser except non-secret status via `/api/health`.
 | `MAX_VIDEO_DURATION_SECONDS` | `600` | Longest accepted clip |
 | `MAX_VIDEO_DIMENSION` | `4096` | Largest accepted width/height |
 | `ANALYSIS_MAX_SIZE` | `512` | Mask resolution (max side). 1024 is a good value with SAM 2 |
-| `JOB_CONCURRENCY` | `2` | Parallel background jobs |
+| `JOB_CONCURRENCY` | `2` | Parallel background jobs (per process, per job type with Redis) |
 | `MIN_FREE_DISK_MB` | `1024` | Refuse work when disk is nearly full |
+| `JOB_BACKEND` | `memory` | `memory` (jobs run inside the web server) or `redis` (BullMQ + `npm run worker` processes) |
+| `REDIS_URL` | `redis://localhost:6379` | Redis for `JOB_BACKEND=redis` (`rediss://` for TLS) |
+| `JOB_QUEUE_PREFIX` | `opensam` | Namespace for keys/queues, so deployments can share a Redis |
+| `WORKER_JOB_TYPES` | `ingest,segment,export` | Job types a worker process takes (e.g. `segment` on GPU hosts) |
+| `RUN_WORKERS_IN_WEB` | `false` | Redis backend: also run a worker inside the web process |
+| `JOB_RETENTION_HOURS` | `168` | How long finished jobs stay queryable in Redis |
+| `WORKER_SHUTDOWN_GRACE_MS` | `25000` | Worker: time running jobs get to finish on SIGTERM |
+| `PROJECT_STORE` | `file` | Project/track metadata: `file` (JSON in `DATA_DIR`) or `postgres` |
+| `DATABASE_URL` | – | `postgres://…`, required with `PROJECT_STORE=postgres` |
+| `DATABASE_POOL_SIZE` | `10` | PostgreSQL connections per process |
+| `MEDIA_STORE` | `local` | Media and exports: `local` (`DATA_DIR`) or `s3` (bucket; `DATA_DIR` becomes a cache) |
+| `S3_BUCKET` | – | Bucket name, required with `MEDIA_STORE=s3` |
+| `S3_REGION` | `us-east-1` | Bucket region |
+| `S3_ENDPOINT` | – | For S3-compatible services (MinIO, R2, …); omit for AWS |
+| `S3_FORCE_PATH_STYLE` | `false` | `true` for MinIO and most self-hosted services |
+| `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY` | – | Optional; otherwise the AWS default credential chain (env, instance role, …) |
+| `S3_PREFIX` | – | Key prefix inside the bucket, e.g. `opensam/prod` |
+| `MEDIA_CACHE_MAX_MB` | `20480` | Per-machine cache of downloaded media (S3 mode) |
 | `LLM_PROVIDER` | `mock` | `mock` or `llama` |
 | `LLAMA_BASE_URL` | `http://localhost:11434/v1` | OpenAI-compatible endpoint |
 | `LLAMA_MODEL` | `llama3.1:8b` | Model name at that endpoint |
 | `LLAMA_API_KEY` | – | Bearer token if required |
 | `LLAMA_TIMEOUT_MS` | `20000` | Per-request timeout |
 | `LLAMA_FALLBACK_TO_RULES` | `true` | Fall back to the rule parser (flagged in the UI) if Llama fails |
-| `SEGMENTATION_PROVIDER` | `mock` | `mock` or `sam2` |
-| `SAM2_SERVICE_URL` | `http://localhost:8008` | Inference server |
+| `SEGMENTATION_PROVIDER` | `mock` | `mock`, `sam3` or `sam2` (match the inference server's `MODEL_FAMILY`) |
+| `SAM2_SERVICE_URL` | `http://localhost:8008` | Inference server, or a comma-separated pool |
 | `SAM2_API_KEY` | – | Must match the server's `INFERENCE_API_KEY` |
 | `SAM2_TIMEOUT_MS` | `300000` | Per-request timeout |
 | `SAM2_SHARED_STORAGE` | `false` | Send file paths instead of uploading (shared disk) |
@@ -213,8 +239,10 @@ npm run dev            # development, http://localhost:3000
 npm run build && npm start   # production build
 ```
 
-The job queue runs inside the Next.js server process, so use a long-running
-server (`next dev` / `next start`, Docker, a VM) — not serverless functions.
+By default the job queue runs inside the Next.js server process, so use a
+long-running server (`next dev` / `next start`, Docker, a VM) — not serverless
+functions. To run jobs in separate processes, see
+[Running workers with Redis](#running-workers-with-redis).
 
 Useful scripts:
 
@@ -224,9 +252,78 @@ Useful scripts:
 | `npm test` | All Vitest suites (unit, components, integration) |
 | `npm run test:e2e` | Production build + Playwright browser tests |
 | `npm run check` | lint + typecheck + tests + build |
+| `npm run worker` | Job worker process (`JOB_BACKEND=redis`) |
+| `npm run db:migrate` | Create/upgrade the PostgreSQL schema (also automatic on first use) |
+| `npm run db:import-files` | Copy file-store projects into PostgreSQL (re-runnable) |
 | `npm run demo:generate` | Re-render the demo clip and its ground-truth masks |
 | `npm run eval:mock` | Measure mock segmentation/tracking IoU on the demo clip |
+| `npm run eval:edges` | Measure export edge accuracy (with/without refinement) against full-resolution ground truth |
 | `npm run demo:hero` | Re-render the landing-page “after” clip through the API |
+
+### Running workers with Redis
+
+With `JOB_BACKEND=redis` the web server only enqueues jobs; worker processes
+— on the same machine or others — run ingest, tracking and export. Progress,
+results and cancellation travel through Redis, so the UI behaves exactly as in
+the single-process setup.
+
+```bash
+redis-server                                   # or any Redis 6.2+
+export JOB_BACKEND=redis REDIS_URL=redis://localhost:6379
+npm run worker                                 # one or more, anywhere that can reach Redis and DATA_DIR
+npm run build && npm start                     # web server(s)
+```
+
+- **Scaling:** start more workers; each takes `JOB_CONCURRENCY` jobs per type.
+  Split by hardware with `WORKER_JOB_TYPES=segment` (GPU hosts) and
+  `WORKER_JOB_TYPES=ingest,export` (CPU hosts).
+- **Storage:** web and workers must either share `DATA_DIR` (a shared volume;
+  project updates take a lock file, so concurrent writers are safe) or use
+  `PROJECT_STORE=postgres` + `MEDIA_STORE=s3`, which needs no shared disk.
+- **Shutdown:** SIGTERM stops taking jobs, gives running ones
+  `WORKER_SHUTDOWN_GRACE_MS` to finish, and records the rest as *interrupted*
+  (the user sees "run it again").
+- **Crashes:** if a worker dies without shutting down, another worker re-runs
+  its job once BullMQ's lock expires (60 s); jobs nobody will finish are
+  failed as interrupted by a janitor.
+- **No worker running:** jobs wait ("Waiting for a worker…"), and Settings →
+  Video processing shows which job types have no worker.
+
+### Storing projects in PostgreSQL
+
+```bash
+export PROJECT_STORE=postgres DATABASE_URL=postgres://user:pass@db:5432/opensam
+npm run db:migrate          # optional: the app migrates on first use too
+npm run db:import-files     # optional: bring over projects created with the file store
+```
+
+Projects live in `opensam_projects` (the full project as JSONB) and tracks in
+`opensam_tracks` (masks in their own column, with precomputed summaries so
+listing never loads mask data). Updates are transactions with row locks, so
+any number of web servers and workers can write concurrently. Tables are
+prefixed `opensam_`, so a shared database is fine. Media files stay in
+`DATA_DIR`.
+
+### Storing media in S3 (no shared disk)
+
+```bash
+export MEDIA_STORE=s3 S3_BUCKET=my-opensam-media S3_REGION=eu-west-1
+# MinIO / R2 / other S3-compatible services:
+# export S3_ENDPOINT=http://minio:9000 S3_FORCE_PATH_STYLE=true S3_ACCESS_KEY_ID=… S3_SECRET_ACCESS_KEY=…
+```
+
+Every file a process produces — the upload, poster, filmstrip, previews,
+exports — is published to the bucket under `projects/<id>/…`. Processes that
+need a file on disk (FFmpeg, the SAM 2 upload) download it into their own
+`DATA_DIR`, which becomes a cache capped at `MEDIA_CACHE_MAX_MB` (least
+recently used files go first; files used in the last hour are kept). The web
+server streams media to the browser from its cache or straight from the
+bucket, with Range support, so playback stays same-origin (canvas previews
+need that) and no bucket CORS setup is needed.
+
+With Redis jobs + PostgreSQL + S3, web servers and workers share nothing but
+those three services, so they can run on separate machines — e.g. workers
+with `WORKER_JOB_TYPES=segment` on GPU hosts.
 
 ## Running with mock AI
 
@@ -292,10 +389,31 @@ How the output is handled (`services/llama/LlamaService.ts`):
 5. The validated command is compiled into an `EditingPlan` by deterministic
    code (`services/llama/plan.ts`) — the model never executes anything.
 
-## Connecting SAM 2
+## Connecting SAM 3 or SAM 2
 
-Run the inference server on a GPU machine — full details in
-[`inference/README.md`](inference/README.md):
+The inference server runs either **SAM 3** (`MODEL_FAMILY=sam3`, the Docker
+image's default) or **SAM 2** (`MODEL_FAMILY=sam2`). With SAM 3, text commands
+like “Track the man in the blue shirt” are matched by SAM 3's own open-vocabulary
+detector instead of a separate grounding model, and clicks, boxes and tracking
+use the SAM 3 tracker. SAM 3's weights are gated: accept the license at
+[huggingface.co/facebook/sam3](https://huggingface.co/facebook/sam3) and give
+the server an `HF_TOKEN`. Full details, cloud-GPU deployment and the SAM 3
+benchmark are in [`inference/README.md`](inference/README.md).
+
+```bash
+# SAM 3 on a GPU machine (24 GB recommended)
+docker build -t opensam-inference inference/
+docker run --gpus all -p 8008:8008 -e HF_TOKEN=hf_... -e INFERENCE_API_KEY=change-me \
+  -v hf-cache:/root/.cache/huggingface opensam-inference
+
+# .env.local on the web app
+SEGMENTATION_PROVIDER=sam3
+SAM2_SERVICE_URL=http://<gpu-host>:8008
+SAM2_API_KEY=change-me
+ANALYSIS_MAX_SIZE=1024
+```
+
+For SAM 2, run the server without Docker or with `-e MODEL_FAMILY=sam2`:
 
 ```bash
 cd inference
@@ -316,12 +434,41 @@ SAM2_API_KEY=change-me
 ANALYSIS_MAX_SIZE=1024
 ```
 
+**Several GPU servers:** list them all —
+`SAM2_SERVICE_URL=http://gpu-a:8008,http://gpu-b:8008`. Each video's session
+stays on one server (chosen by rendezvous hashing, so every web and worker
+process agrees without coordination), different videos spread across the
+pool, and if a server is unreachable or still loading, its videos move to the
+next one automatically (the video is sent there once). A server that
+restarted and lost its sessions gets them back on the next request.
+
 The status appears in **Settings** and in the header badge. The HTTP
 contract (sessions, `/segment`, NDJSON `/propagate`, `/ground`) is documented
 in `inference/README.md` and covered by tests on both sides
 (`tests/unit/sam2-provider.test.ts`, `inference/tests/test_api.py`). You can
 exercise the full web-app → Python path without a GPU using the fake backend:
 `uvicorn tests.fake_server:app --port 8008` in `inference/`.
+
+## Deploying with Docker Compose
+
+`docker-compose.yml` runs the distributed setup on one machine: web, worker,
+Redis, PostgreSQL and MinIO (S3 API), plus the SAM 2 inference server with
+the `gpu` profile.
+
+```bash
+docker compose up --build                       # mock AI → http://localhost:3000
+docker compose up --build --scale worker=3      # more workers
+docker compose --profile gpu up --build         # + SAM 3 / SAM 2 server (NVIDIA Container Toolkit)
+```
+
+Put overrides in a `.env` file next to it (`SEGMENTATION_PROVIDER=sam3` with
+`HF_TOKEN`, or `SEGMENTATION_PROVIDER=sam2` with `MODEL_FAMILY=sam2`;
+`INFERENCE_API_KEY`, `LLM_PROVIDER=llama`, `LLAMA_BASE_URL`,
+`POSTGRES_PASSWORD`, `MINIO_ROOT_USER`/`MINIO_ROOT_PASSWORD`, `PORT`). Web and
+worker containers have separate cache volumes and share only Redis,
+PostgreSQL and MinIO, so moving them to separate machines means pointing the
+same variables at shared services. The root `Dockerfile` builds one image for
+both (`npx next start` or `npm run worker`).
 
 ## FFmpeg setup
 
@@ -348,7 +495,8 @@ cancellation.
 | Setup | Hardware | Notes |
 | --- | --- | --- |
 | Mock mode | Any laptop CPU | ~5 ms/frame tracking at 512 px |
-| SAM 2.1 Hiera-L | 16–24 GB NVIDIA GPU (L4, A10G, RTX 4090) | Best quality |
+| SAM 3 (tracker + text detector) | 16–24 GB NVIDIA GPU (L4, A10G, RTX 4090) or larger | Text commands built in; `SAM3_TEXT=0` loads the tracker only |
+| SAM 2.1 Hiera-L | 16–24 GB NVIDIA GPU (L4, A10G, RTX 4090) | |
 | SAM 2.1 Hiera-B+ / S / T | 8–12 GB | Faster, lower quality |
 | Grounding DINO tiny | +2 GB | Enables text → object without clicks |
 | Llama 3.1 8B (Ollama, 4-bit) | 8 GB GPU or Apple Silicon | Or use a hosted endpoint |
@@ -360,11 +508,11 @@ seams where it will be split:
 
 | MVP | Production replacement | Seam |
 | --- | --- | --- |
-| In-process `JobQueue` + JSON job files | BullMQ/Redis or a cloud queue; workers as separate processes/containers | `services/jobs/JobQueue.ts` (`JobHandler` only sees `signal` + `progress`) |
-| `FileSystemProjectRepository` | PostgreSQL (projects, tracks; masks as JSONB or in object storage) | `services/projects/ProjectRepository.ts` |
-| Local `data/` media | S3/GCS with signed range URLs, CDN for previews | `services/storage/paths.ts`, media route |
-| Mock / single inference server | Autoscaled GPU pool behind a load balancer, session affinity by video | `services/sam2/SAM2Provider.ts` contract |
-| Polling job status | Server-sent events / WebSockets | `hooks/useJobPolling.ts` |
+| In-process `JobQueue` + JSON job files (default) | **Available:** `JOB_BACKEND=redis` — BullMQ on Redis, `npm run worker` processes | `services/jobs/types.ts` (`JobQueuePort`; handlers only see `signal` + `progress`) |
+| `FileSystemProjectRepository` (default) | **Available:** `PROJECT_STORE=postgres` — projects and tracks in PostgreSQL | `services/projects/ProjectRepository.ts` |
+| Local `data/` media (default) | **Available:** `MEDIA_STORE=s3` — S3 or compatible storage, per-machine cache, range streaming. Next: signed URLs/CDN for previews | `services/storage/objectStore.ts`, `services/storage/projectMedia.ts` |
+| Mock / single inference server | **Available:** a pool of inference servers with per-video affinity and failover. Next: autoscaling the pool | `services/sam2/SAM2Provider.ts` contract |
+| Job status polling | **Available:** server-sent events per project (works across worker processes via Redis pub/sub), polling fallback | `services/jobs/events.ts`, `hooks/useJobUpdates.ts` |
 | In-memory rate limits | Redis rate limiting at the edge | `lib/server/api.ts` |
 
 Export compositing is plain TypeScript over raw frames piped through FFmpeg;
@@ -374,10 +522,19 @@ at scale it would move to the GPU workers (or FFmpeg filter graphs with
 ## Testing
 
 ```bash
-npm test                 # 155 Vitest tests: unit, components (jsdom), integration
+npm test                 # 233 Vitest tests: unit, components (jsdom), integration
 npm run test:e2e         # Playwright (set PLAYWRIGHT_CHROMIUM_EXECUTABLE to reuse a local Chromium)
 cd inference && pytest   # Python contract tests (no GPU needed)
 ```
+
+SAM 3 without a GPU or weights: with `torch`, `torchvision` and
+`transformers>=5.18` in a Python environment, `inference/tests/test_sam3_backend.py`
+runs the SAM 3 backend, HTTP API and benchmark against tiny randomly
+initialised SAM 3 models, and
+`OPENSAM_SAM3_PYTHON=/path/to/python npm test -- tests/integration/sam3-server.test.ts`
+drives the web app's client against that server (upload → text grounding →
+segment → tracking). Model quality is measured separately on a GPU with
+`inference/bench/sam3_bench.py`.
 
 - **Unit** — RLE and brush ops, command parsing (20+ phrasings), model-output
   validation (malformed/hostile JSON), Llama provider (mocked HTTP: repair,
@@ -399,10 +556,45 @@ cd inference && pytest   # Python contract tests (no GPU needed)
   the H.264 and VP9 preview proxies show exactly the frame masks were computed
   on, portrait video is analysed upright, box → track matches ground truth,
   and exports keep display orientation, every frame and the audio.
+- **Live updates** — the SSE route (snapshot, coalesced progress, no job
+  inputs on the wire, cleanup on abort/disconnect, cross-process via Redis) and
+  the client hook (results applied exactly once, no replay of old jobs after a
+  reconnect, fallback to polling, out-of-order updates never regress a job).
+- **Project stores** — one contract suite run against both the file store and
+  a throwaway PostgreSQL cluster: CRUD, validation, 24 concurrent updates from
+  two "processes" with nothing lost, track summaries without mask data,
+  cascading deletes; plus concurrent migrations, unreachable database →
+  friendly error, and file → PostgreSQL import. The multi-process pipeline
+  suite also runs with PostgreSQL as the store.
+- **Object storage** (skipped without `moto_server`, from
+  `pip install -r inference/requirements-dev.txt`) — against an S3-compatible
+  server: multipart upload of a 40 MB file, download-on-demand with
+  concurrent requests deduplicated, serving from the bucket with Range /
+  416 / HEAD / 304, JSON documents across machines, LRU cache trimming,
+  deleting a project's objects, and an unreachable store → friendly error.
+  The multi-process pipeline suite also runs with **separate disks** for the
+  web and worker processes (Redis + PostgreSQL + S3 only).
+- **Edge refinement** — on synthetic frames (a misplaced, blurry mask edge
+  moves onto the image edge; no invented edges in flat regions; stays in the
+  subject's neighbourhood) and a regression test on the demo clip against
+  full-resolution ground truth (every subject improves, with ground-truth
+  and with tracked masks).
+- **SAM 2 server pool** — routing (stable across processes, spread across
+  servers), failover when a server is down or loading and back after the
+  cooldown, re-creating sessions a restarted server forgot, pool health; and
+  against two real inference servers (fake backend), killing the one that
+  owns a session mid-way.
+- **Job queue on Redis** (skipped if `redis-server` isn't installed) — a
+  throwaway Redis per run: cross-process progress/results, cancelling queued
+  and running jobs, graceful shutdown (including handlers that ignore the
+  abort), crash recovery via BullMQ stall detection, the orphan janitor, and
+  the full upload → AI command → export pipeline with a real `workers/main.ts`
+  process, then SIGTERM and a replacement worker.
 - **Python** — the inference server's HTTP contract with a fake backend, plus
   SAM 2 frame extraction on the web app's frame grid.
 - **E2E** — landing page → Try Demo → AI command → effect → shortcuts/undo →
-  export → download; a real upload of a rotated variable-frame-rate phone
+  export → download (asserting progress arrives over the event stream with no
+  job polling); a real upload of a rotated variable-frame-rate phone
   clip → preview proxy → click-to-track, comparing the decoded video pixels
   with the mask overlay's pixels frame by frame (and after pausing mid-play);
   plus an accessible-name audit of every editor button.
@@ -446,8 +638,15 @@ cd inference && pytest   # Python contract tests (no GPU needed)
 - Mock inference is classical computer vision, not a neural network (see the
   table above). Production-quality masks need SAM 2.
 - Masks are stored at analysis resolution (default 512 px) and upscaled with
-  feathering; hair-level detail needs a higher `ANALYSIS_MAX_SIZE` with SAM 2
-  (and a matting model — see roadmap).
+  feathering. **Refine edges** (on by default) then snaps the upscaled edges
+  to the frame with a colour guided filter — on the demo clip it cuts the
+  alpha error near the true boundary by ~27% and raises full-resolution IoU
+  for every subject (`npm run eval:edges`) — but it can't recover detail the
+  mask never had (a pixel wrongly labelled at analysis resolution keeps some
+  alpha), and where the subject's colour matches the background it leaves
+  the edge as it was. Hair-level mattes need a higher `ANALYSIS_MAX_SIZE` with
+  SAM 2 and a matting model (roadmap). The live preview applies refinement on
+  paused frames only.
 - Variable-frame-rate video (typical of phones) is placed on a constant grid
   at its average frame rate: frame *i* is the picture on screen at
   (*i* + ½) / fps, which is what the browser shows, so masks stay aligned.
@@ -464,10 +663,12 @@ cd inference && pytest   # Python contract tests (no GPU needed)
 
 1. **Browser-based AI rotoscoping** — this MVP: natural language + clicks →
    SAM 2 masks → tracking → export, with a mock mode for development.
-2. **Cloud GPU inference** — autoscaled SAM 2 workers, Redis/BullMQ jobs,
-   object storage, Postgres, SSE progress, matting refinement for hair, video
-   inpainting (e.g. ProPainter) for object removal, WebCodecs frame-accurate
-   preview.
+2. **Cloud GPU inference** — *in progress.* Done: Redis/BullMQ jobs with
+   separate worker processes, SSE progress, PostgreSQL, S3 object storage, a
+   SAM 2 server pool with failover, Docker Compose, guided-filter edge
+   refinement. Next: autoscaling the GPU pool, a matting network for hair,
+   video inpainting (e.g. ProPainter) for object removal, WebCodecs
+   frame-accurate preview, signed URLs / CDN for media.
 3. **Real-time collaboration** — accounts, shared projects, presence, comments
    on frames, CRDT-based document sync (the document/history model is already
    snapshot-based and serializable).
@@ -484,9 +685,10 @@ cd inference && pytest   # Python contract tests (no GPU needed)
 
 ## License & attribution
 
-OpenSAM Studio's own code is provided as-is for evaluation. SAM 2 and Llama
-are released by Meta under their own licenses (Apache 2.0 for SAM 2; the Llama
-Community License for Llama models) — review them before production use.
+OpenSAM Studio's own code is provided as-is for evaluation. SAM 3, SAM 2 and
+Llama are released by Meta under their own licenses (the SAM License for SAM 3,
+Apache 2.0 for SAM 2, the Llama Community License for Llama models) — review
+them before production use.
 FFmpeg binaries are distributed under the GPL/LGPL by their respective
 packagers. The demo clip is procedurally generated by
 `scripts/generate-demo.ts` and contains no third-party footage.

@@ -63,6 +63,8 @@ const jsonBody = (v: unknown) => JSON.stringify(v);
 
 export interface HealthInfo {
   ok: boolean;
+  storage: { backend: "file" | "postgres"; ok: boolean; message: string };
+  media: { backend: "local" | "s3"; ok: boolean; message: string };
   ffmpeg: { available: boolean; version: string | null; encoders: Record<string, boolean>; source: { ffmpeg: string; ffprobe: string } | null };
   formats: Record<string, boolean>;
   ai: {
@@ -70,7 +72,9 @@ export interface HealthInfo {
     segmentation: { id: string; name: string; kind: "mock" | "production"; description: string; health: { status: string; message: string } };
   };
   config: { maxUploadMb: number; maxDurationSeconds: number; analysisMaxSize: number; llmProvider: string; llamaModel: string | null; segmentationProvider: string };
-  queue: { running: number; queued: number; concurrency: number };
+  queue:
+    | { backend: "memory" | "redis"; running: number; queued: number; concurrency: number; workers?: Record<string, number> }
+    | { backend: "memory" | "redis"; error: string };
 }
 
 export interface ProjectBundle {
@@ -124,6 +128,7 @@ export const api = {
   listJobs: (pid: string, activeOnly = false) => request<{ jobs: Job[] }>(`/api/projects/${pid}/jobs${activeOnly ? "?active=1" : ""}`),
 
   mediaUrl: (pid: string, asset: "preview" | "source" | "poster" | "filmstrip") => `/api/projects/${pid}/media/${asset}`,
+  eventsUrl: (pid: string) => `/api/projects/${pid}/events`,
   exportUrl: (pid: string, exportId: string) => `/api/projects/${pid}/exports/${exportId}`,
 };
 

@@ -1,0 +1,12 @@
+.git
+node_modules
+.next
+data
+.e2e-data
+.env*
+!.env.example
+test-results
+playwright-report
+inference/.venv
+inference/**/__pycache__
+*.log

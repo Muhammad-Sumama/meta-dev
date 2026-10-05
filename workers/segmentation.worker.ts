@@ -6,8 +6,9 @@ import { TRACK_COLORS, type PointPrompt, type BoxPrompt, type Track } from "@/li
 import { newId } from "@/lib/utils/ids";
 import { getAIServices } from "@/services/ai/registry";
 import type { TrackKeyframe } from "@/services/ai/types";
-import type { JobHandler } from "@/services/jobs/JobQueue";
-import { getProjectRepository, requireProject } from "@/services/projects";
+import type { JobHandler } from "@/services/jobs/types";
+import { getProjectRepository } from "@/services/projects";
+import { requireJobProject } from "./project";
 
 /**
  * The "AI worker": runs segmentation/tracking jobs.
@@ -56,7 +57,7 @@ function titleCase(s: string) {
 export const segmentationWorker: JobHandler<SegmentJobInput, SegmentJobResult> = async ({ job, signal, progress }) => {
   const input = job.input;
   const repo = getProjectRepository();
-  const project = await requireProject(job.projectId);
+  const project = await requireJobProject(job.projectId);
   const { sam2 } = getAIServices();
   const n = project.analysis.width * project.analysis.height;
   const frames: Record<string, RLECounts> = {};

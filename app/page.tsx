@@ -41,7 +41,7 @@ const FEATURES = [
   {
     icon: Cpu,
     title: "Powered by open AI models",
-    body: "Built around open models including SAM 2 for segmentation and Llama for understanding requests.",
+    body: "Built around open models including SAM 3 and SAM 2 for segmentation and Llama for understanding requests.",
   },
   {
     icon: Layers,
@@ -182,7 +182,7 @@ export default function LandingPage() {
               </div>
               <pre className="overflow-x-auto rounded-lg border border-border bg-panel p-4 font-mono text-[12.5px] leading-relaxed text-muted">{COMMAND_JSON}</pre>
               <div className="flex items-center gap-2 pl-4 text-[12px] text-faint">
-                <ScanLine className="size-3.5" /> SAM 2 → masks on every frame → FFmpeg export
+                <ScanLine className="size-3.5" /> SAM 3 → masks on every frame → FFmpeg export
               </div>
             </div>
           </div>
@@ -195,13 +195,13 @@ export default function LandingPage() {
               <div>
                 <h2 className="text-3xl font-semibold tracking-tight">Built around open AI models</h2>
                 <p className="mt-4 text-[15px] leading-relaxed text-muted">
-                  OpenSAM Studio is an independent creative tool built around open AI technologies, including SAM 2 and Llama. Model
+                  OpenSAM Studio is an independent creative tool built around open AI technologies, including SAM 3, SAM 2 and Llama. Model
                   providers sit behind a clean interface, so the same editor runs on a laptop or talks to GPU servers.
                 </p>
               </div>
               <dl className="grid gap-4 sm:grid-cols-2">
                 {[
-                  ["SAM 2", "Promptable video segmentation: points, boxes and masks in, tracked masks out."],
+                  ["SAM 3 / SAM 2", "Promptable video segmentation: text, points, boxes and masks in, tracked masks out."],
                   ["Llama", "Turns natural-language requests into structured, schema-validated editing commands."],
                   ["Mock mode", "A classical computer-vision fallback so the whole workflow works without a GPU — clearly labeled in the app."],
                   ["FFmpeg", "Decoding, thumbnails, transparent video, PNG sequences and matte exports."],
@@ -243,7 +243,7 @@ export default function LandingPage() {
             <Logo className="size-5" /> OpenSAM Studio
           </div>
           <p>
-            OpenSAM Studio is an independent project. It is not affiliated with, endorsed by, or sponsored by Meta Platforms, Inc. SAM 2 and Llama are
+            OpenSAM Studio is an independent project. It is not affiliated with, endorsed by, or sponsored by Meta Platforms, Inc. SAM 3, SAM 2 and Llama are
             models released by Meta under their respective licenses; OpenSAM Studio is built to work with them.
           </p>
         </div>

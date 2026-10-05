@@ -13,7 +13,8 @@ import type { AIProvider } from "./types";
  * THE switch between mock and production inference.
  *
  *   LLM_PROVIDER=mock | llama               → MockLanguageProvider | LlamaProvider
- *   SEGMENTATION_PROVIDER=mock | sam2        → MockSegmentationProvider | SAM2Provider
+ *   SEGMENTATION_PROVIDER=mock | sam2 | sam3 → MockSegmentationProvider | SAM2Provider
+ *     (sam3: the same HTTP contract, served with MODEL_FAMILY=sam3)
  *
  * Nothing else in the application knows which implementation is active;
  * the UI reads `info.kind` to label mock results honestly.
@@ -42,9 +43,10 @@ export function getAIServices(): AIServices {
       : new MockLanguageProvider();
 
   const segmentation =
-    cfg.SEGMENTATION_PROVIDER === "sam2"
+    cfg.SEGMENTATION_PROVIDER === "sam2" || cfg.SEGMENTATION_PROVIDER === "sam3"
       ? new SAM2Provider({
-          baseUrl: cfg.SAM2_SERVICE_URL,
+          family: cfg.SEGMENTATION_PROVIDER,
+          baseUrl: cfg.SAM2_SERVICE_URL.split(",").map((u) => u.trim()),
           apiKey: cfg.SAM2_API_KEY,
           timeoutMs: cfg.SAM2_TIMEOUT_MS,
           sharedStorage: cfg.SAM2_SHARED_STORAGE,

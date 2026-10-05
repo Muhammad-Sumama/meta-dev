@@ -6,3 +6,6 @@ numpy>=1.26
 pillow>=10.3
 httpx>=0.27
 pytest>=8
+# Not used by the inference server: provides `moto_server`, the S3-compatible
+# server the web app's MEDIA_STORE=s3 integration tests run against.
+moto[server]>=5
