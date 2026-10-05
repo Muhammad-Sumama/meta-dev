@@ -46,6 +46,8 @@ export interface SAM2ProviderConfig {
   /** How long a failed server is skipped. */
   cooldownMs?: number;
   now?: () => number;
+  /** Which model the servers run (inference server MODEL_FAMILY). Only changes labels. */
+  family?: "sam2" | "sam3";
 }
 
 /** A server that can't take work right now (unreachable, or 503): try another. */
@@ -84,18 +86,27 @@ function boxToWire(b: { x0: number; y0: number; x1: number; y1: number } | undef
 }
 
 export class SAM2Provider implements SegmentationProvider {
-  readonly info: ProviderInfo = {
-    id: "sam2",
-    name: "SAM 2",
-    kind: "production",
-    description: "Segment Anything Model 2 video predictor served by the OpenSAM inference server.",
-  };
+  readonly info: ProviderInfo;
   private readonly fetchImpl: typeof fetch;
   private readonly servers: string[];
   private readonly downUntil = new Map<string, number>();
   private readonly now: () => number;
 
   constructor(private readonly cfg: SAM2ProviderConfig) {
+    this.info =
+      cfg.family === "sam3"
+        ? {
+            id: "sam3",
+            name: "SAM 3",
+            kind: "production",
+            description: "Segment Anything Model 3 (tracker + text concept detection) served by the OpenSAM inference server.",
+          }
+        : {
+            id: "sam2",
+            name: "SAM 2",
+            kind: "production",
+            description: "Segment Anything Model 2 video predictor served by the OpenSAM inference server.",
+          };
     this.fetchImpl = cfg.fetchImpl ?? fetch;
     this.now = cfg.now ?? Date.now;
     this.servers = (Array.isArray(cfg.baseUrl) ? cfg.baseUrl : [cfg.baseUrl]).map((u) => u.trim().replace(/\/+$/, "")).filter(Boolean);
@@ -134,13 +145,13 @@ export class SAM2Provider implements SegmentationProvider {
     } catch (err) {
       if (opts.signal?.aborted) throw Object.assign(new Error("cancelled"), { name: "AbortError" });
       if (timeout.aborted) throw new AppError("AI_TIMEOUT", { message: "The segmentation model took too long.", cause: err });
-      throw new ServerUnavailable(server, "We couldn't reach the SAM 2 server.", err);
+      throw new ServerUnavailable(server, `We couldn't reach the ${this.info.name} server.`, err);
     }
     if (res.status === 401 || res.status === 403) {
-      throw new AppError("MODEL_UNAVAILABLE", { message: "The SAM 2 server rejected our credentials.", hint: "Check SAM2_API_KEY." });
+      throw new AppError("MODEL_UNAVAILABLE", { message: `The ${this.info.name} server rejected our credentials.`, hint: "Check SAM2_API_KEY." });
     }
     if (res.status === 507 || res.status === 413) throw new AppError("INSUFFICIENT_RESOURCES", { message: "The GPU server ran out of memory for this video." });
-    if (res.status === 503) throw new ServerUnavailable(server, "SAM 2 is still loading or unavailable.");
+    if (res.status === 503) throw new ServerUnavailable(server, `${this.info.name} is still loading or unavailable.`);
     return res;
   }
 
@@ -173,11 +184,11 @@ export class SAM2Provider implements SegmentationProvider {
             continue;
           }
         }
-        if (err instanceof SessionGone) throw new AppError("SEGMENTATION_FAILED", { message: "The SAM 2 server lost this video's session. Try again." });
+        if (err instanceof SessionGone) throw new AppError("SEGMENTATION_FAILED", { message: `The ${this.info.name} server lost this video's session. Try again.` });
         throw err;
       }
     }
-    throw new AppError("MODEL_UNAVAILABLE", { message: "No SAM 2 server is available." });
+    throw new AppError("MODEL_UNAVAILABLE", { message: `No ${this.info.name} server is available.` });
   }
 
   private async json<T>(res: Response, fallback: "SEGMENTATION_FAILED" | "TRACKING_FAILED"): Promise<T> {
@@ -218,19 +229,19 @@ export class SAM2Provider implements SegmentationProvider {
     const latencyMs = Date.now() - t0;
     if (this.servers.length === 1) {
       const [r] = results;
-      if (r.status === "unavailable") return { status: "unavailable", message: r.reachable ? "SAM 2 server reported an error." : "Can't reach the SAM 2 server." };
-      if (r.status === "degraded") return { status: "degraded", message: "SAM 2 is loading the model…" };
-      return { status: "ready", message: `SAM 2 ready (${r.body.model ?? "model"} on ${r.body.device ?? "device"}).`, latencyMs, details: { grounding } };
+      if (r.status === "unavailable") return { status: "unavailable", message: r.reachable ? `${this.info.name} server reported an error.` : `Can't reach the ${this.info.name} server.` };
+      if (r.status === "degraded") return { status: "degraded", message: `${this.info.name} is loading the model…` };
+      return { status: "ready", message: `${this.info.name} ready (${r.body.model ?? "model"} on ${r.body.device ?? "device"}).`, latencyMs, details: { grounding } };
     }
     const total = this.servers.length;
     const details = { grounding, serversReady: ready.length, servers: total };
     if (ready.length === total) {
       const first = ready[0].body;
-      return { status: "ready", message: `${total} SAM 2 servers ready (${first.model ?? "model"} on ${first.device ?? "device"}).`, latencyMs, details };
+      return { status: "ready", message: `${total} ${this.info.name} servers ready (${first.model ?? "model"} on ${first.device ?? "device"}).`, latencyMs, details };
     }
-    if (ready.length > 0) return { status: "degraded", message: `${ready.length} of ${total} SAM 2 servers ready; videos on the others move automatically.`, latencyMs, details };
+    if (ready.length > 0) return { status: "degraded", message: `${ready.length} of ${total} ${this.info.name} servers ready; videos on the others move automatically.`, latencyMs, details };
     const loading = results.some((r) => r.status === "degraded");
-    return { status: loading ? "degraded" : "unavailable", message: loading ? "SAM 2 servers are loading the model…" : "Can't reach any SAM 2 server.", details };
+    return { status: loading ? "degraded" : "unavailable", message: loading ? `${this.info.name} servers are loading the model…` : `Can't reach any ${this.info.name} server.`, details };
   }
 
   async initializeVideo(source: VideoSource, opts: CallOptions = {}): Promise<VideoSession> {
@@ -277,7 +288,7 @@ export class SAM2Provider implements SegmentationProvider {
     const res = await this.post(session, "ground", { frame_indices: frameIndices, text: query.description }, opts);
     if (res.status === 501) {
       throw new AppError("MODEL_UNAVAILABLE", {
-        message: "Text grounding isn't enabled on the SAM 2 server.",
+        message: `Text grounding isn't enabled on the ${this.info.name} server.`,
         hint: "Enable GROUNDING_MODEL on the inference server, or click the object instead.",
       });
     }
@@ -368,7 +379,7 @@ export class SAM2Provider implements SegmentationProvider {
       } else if (ev.type === "progress") {
         cb.onProgress?.(ev.done ?? 0, ev.total ?? 0);
       } else if (ev.type === "error") {
-        throw new AppError("TRACKING_FAILED", { cause: new Error(ev.message ?? "SAM 2 propagation failed") });
+        throw new AppError("TRACKING_FAILED", { cause: new Error(ev.message ?? `${this.info.name} propagation failed`) });
       } else if (ev.type === "done") {
         finished = true;
       }
@@ -384,7 +395,7 @@ export class SAM2Provider implements SegmentationProvider {
       }
     }
     await handle(buf);
-    if (!finished) throw new AppError("TRACKING_FAILED", { message: "The SAM 2 server stopped before finishing." });
+    if (!finished) throw new AppError("TRACKING_FAILED", { message: `The ${this.info.name} server stopped before finishing.` });
   }
 
   async disposeVideo(session: VideoSession): Promise<void> {

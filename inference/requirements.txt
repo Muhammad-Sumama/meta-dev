@@ -7,11 +7,12 @@ pillow>=10.3
 
 # Model runtime — install the PyTorch build that matches your CUDA version first:
 #   https://pytorch.org/get-started/locally/
-torch>=2.5.1
-torchvision>=0.20.1
+torch>=2.7
+torchvision>=0.22
 
-# SAM 2 (Meta's reference implementation)
+# SAM 2 (Meta's reference implementation) — MODEL_FAMILY=sam2
 sam2 @ git+https://github.com/facebookresearch/sam2.git
 
-# Optional: open-vocabulary text grounding (set GROUNDING_MODEL)
-transformers>=4.46
+# SAM 3 (MODEL_FAMILY=sam3: tracker + text concept detection) and the optional
+# Grounding DINO text detector used with SAM 2. 5.18 is the release tested.
+transformers>=5.18

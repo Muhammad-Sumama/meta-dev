@@ -149,7 +149,7 @@ describe("SAM2Provider server pool", () => {
   const src = session.source;
 
   /** A fake pool: each server knows some sessions; `down` servers refuse connections. */
-  function pool(opts: { down?: Set<string>; loading?: Set<string>; clock?: { t: number } } = {}) {
+  function pool(opts: { down?: Set<string>; loading?: Set<string>; clock?: { t: number }; family?: "sam2" | "sam3" } = {}) {
     const sessions = new Map<string, Set<string>>(SERVERS.map((s) => [s, new Set()]));
     const calls: string[] = [];
     const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
@@ -171,7 +171,7 @@ describe("SAM2Provider server pool", () => {
       return json({});
     }) as unknown as typeof fetch;
     const clock = opts.clock ?? { t: 0 };
-    const provider = new SAM2Provider({ baseUrl: SERVERS, timeoutMs: 2000, sharedStorage: true, fetchImpl, cooldownMs: 10_000, now: () => clock.t });
+    const provider = new SAM2Provider({ baseUrl: SERVERS, timeoutMs: 2000, sharedStorage: true, fetchImpl, cooldownMs: 10_000, now: () => clock.t, family: opts.family });
     return { provider, sessions, calls, clock };
   }
 
@@ -232,6 +232,14 @@ describe("SAM2Provider server pool", () => {
     const { provider } = pool({ down: new Set(SERVERS) });
     await expect(provider.initializeVideo(src)).rejects.toMatchObject({ code: "MODEL_UNAVAILABLE" });
     await expect(provider.health()).resolves.toMatchObject({ status: "unavailable", message: "Can't reach any SAM 2 server." });
+  });
+
+  it("labels a SAM 3 deployment as SAM 3", async () => {
+    const { provider } = pool({ family: "sam3" });
+    expect(provider.info).toMatchObject({ id: "sam3", name: "SAM 3", kind: "production" });
+    expect(await provider.health()).toMatchObject({ status: "ready", message: expect.stringMatching(/^3 SAM 3 servers ready/) });
+    const down = pool({ family: "sam3", down: new Set(SERVERS) }).provider;
+    await expect(down.health()).resolves.toMatchObject({ message: "Can't reach any SAM 3 server." });
   });
 
   it("reports pool health", async () => {

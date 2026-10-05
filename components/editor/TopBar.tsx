@@ -59,7 +59,7 @@ export function TopBar() {
         <Hint
           label={
             mock
-              ? "Running with mock inference: classical computer vision stands in for SAM 2, and a rule-based parser stands in for Llama. See Settings."
+              ? "Running with mock inference: classical computer vision stands in for SAM 3 / SAM 2, and a rule-based parser stands in for Llama. See Settings."
               : "Connected to production models."
           }
         >

@@ -5,7 +5,7 @@ isolate, and OpenSAM Studio segments and tracks it for you — then exports a
 matte, a transparent cutout, or a finished video.
 
 > OpenSAM Studio is an independent creative tool built around open AI
-> technologies, including SAM 2 and Llama. It is **not** affiliated with,
+> technologies, including SAM 3, SAM 2 and Llama. It is **not** affiliated with,
 > endorsed by, or sponsored by Meta Platforms, Inc.
 
 ```
@@ -13,7 +13,7 @@ Video  →  natural language  →  object segmentation  →  tracking  →  mask
 ```
 
 It runs end-to-end on a laptop with no GPU and no API keys (mock AI mode), and
-switches to real SAM 2 / Llama inference by changing two environment variables.
+switches to real SAM 3 (or SAM 2) / Llama inference by changing two environment variables.
 
 ---
 
@@ -29,7 +29,7 @@ switches to real SAM 2 / Llama inference by changing two environment variables.
 - [Deploying with Docker Compose](#deploying-with-docker-compose)
 - [Running with mock AI](#running-with-mock-ai) — **where the mock ends and real AI begins**
 - [Connecting Llama](#connecting-llama)
-- [Connecting SAM 2](#connecting-sam-2)
+- [Connecting SAM 3 or SAM 2](#connecting-sam-3-or-sam-2)
 - [FFmpeg setup](#ffmpeg-setup)
 - [GPU requirements](#gpu-requirements)
 - [Production architecture](#production-architecture)
@@ -225,7 +225,7 @@ Nothing is exposed to the browser except non-secret status via `/api/health`.
 | `LLAMA_API_KEY` | – | Bearer token if required |
 | `LLAMA_TIMEOUT_MS` | `20000` | Per-request timeout |
 | `LLAMA_FALLBACK_TO_RULES` | `true` | Fall back to the rule parser (flagged in the UI) if Llama fails |
-| `SEGMENTATION_PROVIDER` | `mock` | `mock` or `sam2` |
+| `SEGMENTATION_PROVIDER` | `mock` | `mock`, `sam3` or `sam2` (match the inference server's `MODEL_FAMILY`) |
 | `SAM2_SERVICE_URL` | `http://localhost:8008` | Inference server, or a comma-separated pool |
 | `SAM2_API_KEY` | – | Must match the server's `INFERENCE_API_KEY` |
 | `SAM2_TIMEOUT_MS` | `300000` | Per-request timeout |
@@ -389,10 +389,31 @@ How the output is handled (`services/llama/LlamaService.ts`):
 5. The validated command is compiled into an `EditingPlan` by deterministic
    code (`services/llama/plan.ts`) — the model never executes anything.
 
-## Connecting SAM 2
+## Connecting SAM 3 or SAM 2
 
-Run the inference server on a GPU machine — full details in
-[`inference/README.md`](inference/README.md):
+The inference server runs either **SAM 3** (`MODEL_FAMILY=sam3`, the Docker
+image's default) or **SAM 2** (`MODEL_FAMILY=sam2`). With SAM 3, text commands
+like “Track the man in the blue shirt” are matched by SAM 3's own open-vocabulary
+detector instead of a separate grounding model, and clicks, boxes and tracking
+use the SAM 3 tracker. SAM 3's weights are gated: accept the license at
+[huggingface.co/facebook/sam3](https://huggingface.co/facebook/sam3) and give
+the server an `HF_TOKEN`. Full details, cloud-GPU deployment and the SAM 3
+benchmark are in [`inference/README.md`](inference/README.md).
+
+```bash
+# SAM 3 on a GPU machine (24 GB recommended)
+docker build -t opensam-inference inference/
+docker run --gpus all -p 8008:8008 -e HF_TOKEN=hf_... -e INFERENCE_API_KEY=change-me \
+  -v hf-cache:/root/.cache/huggingface opensam-inference
+
+# .env.local on the web app
+SEGMENTATION_PROVIDER=sam3
+SAM2_SERVICE_URL=http://<gpu-host>:8008
+SAM2_API_KEY=change-me
+ANALYSIS_MAX_SIZE=1024
+```
+
+For SAM 2, run the server without Docker or with `-e MODEL_FAMILY=sam2`:
 
 ```bash
 cd inference
@@ -437,10 +458,11 @@ the `gpu` profile.
 ```bash
 docker compose up --build                       # mock AI → http://localhost:3000
 docker compose up --build --scale worker=3      # more workers
-docker compose --profile gpu up --build         # + SAM 2 (NVIDIA Container Toolkit)
+docker compose --profile gpu up --build         # + SAM 3 / SAM 2 server (NVIDIA Container Toolkit)
 ```
 
-Put overrides in a `.env` file next to it (`SEGMENTATION_PROVIDER=sam2`,
+Put overrides in a `.env` file next to it (`SEGMENTATION_PROVIDER=sam3` with
+`HF_TOKEN`, or `SEGMENTATION_PROVIDER=sam2` with `MODEL_FAMILY=sam2`;
 `INFERENCE_API_KEY`, `LLM_PROVIDER=llama`, `LLAMA_BASE_URL`,
 `POSTGRES_PASSWORD`, `MINIO_ROOT_USER`/`MINIO_ROOT_PASSWORD`, `PORT`). Web and
 worker containers have separate cache volumes and share only Redis,
@@ -473,7 +495,8 @@ cancellation.
 | Setup | Hardware | Notes |
 | --- | --- | --- |
 | Mock mode | Any laptop CPU | ~5 ms/frame tracking at 512 px |
-| SAM 2.1 Hiera-L | 16–24 GB NVIDIA GPU (L4, A10G, RTX 4090) | Best quality |
+| SAM 3 (tracker + text detector) | 16–24 GB NVIDIA GPU (L4, A10G, RTX 4090) or larger | Text commands built in; `SAM3_TEXT=0` loads the tracker only |
+| SAM 2.1 Hiera-L | 16–24 GB NVIDIA GPU (L4, A10G, RTX 4090) | |
 | SAM 2.1 Hiera-B+ / S / T | 8–12 GB | Faster, lower quality |
 | Grounding DINO tiny | +2 GB | Enables text → object without clicks |
 | Llama 3.1 8B (Ollama, 4-bit) | 8 GB GPU or Apple Silicon | Or use a hosted endpoint |
@@ -499,10 +522,19 @@ at scale it would move to the GPU workers (or FFmpeg filter graphs with
 ## Testing
 
 ```bash
-npm test                 # 231 Vitest tests: unit, components (jsdom), integration
+npm test                 # 233 Vitest tests: unit, components (jsdom), integration
 npm run test:e2e         # Playwright (set PLAYWRIGHT_CHROMIUM_EXECUTABLE to reuse a local Chromium)
 cd inference && pytest   # Python contract tests (no GPU needed)
 ```
+
+SAM 3 without a GPU or weights: with `torch`, `torchvision` and
+`transformers>=5.18` in a Python environment, `inference/tests/test_sam3_backend.py`
+runs the SAM 3 backend, HTTP API and benchmark against tiny randomly
+initialised SAM 3 models, and
+`OPENSAM_SAM3_PYTHON=/path/to/python npm test -- tests/integration/sam3-server.test.ts`
+drives the web app's client against that server (upload → text grounding →
+segment → tracking). Model quality is measured separately on a GPU with
+`inference/bench/sam3_bench.py`.
 
 - **Unit** — RLE and brush ops, command parsing (20+ phrasings), model-output
   validation (malformed/hostile JSON), Llama provider (mocked HTTP: repair,
@@ -653,9 +685,10 @@ cd inference && pytest   # Python contract tests (no GPU needed)
 
 ## License & attribution
 
-OpenSAM Studio's own code is provided as-is for evaluation. SAM 2 and Llama
-are released by Meta under their own licenses (Apache 2.0 for SAM 2; the Llama
-Community License for Llama models) — review them before production use.
+OpenSAM Studio's own code is provided as-is for evaluation. SAM 3, SAM 2 and
+Llama are released by Meta under their own licenses (the SAM License for SAM 3,
+Apache 2.0 for SAM 2, the Llama Community License for Llama models) — review
+them before production use.
 FFmpeg binaries are distributed under the GPL/LGPL by their respective
 packagers. The demo clip is procedurally generated by
 `scripts/generate-demo.ts` and contains no third-party footage.

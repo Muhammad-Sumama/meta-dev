@@ -112,7 +112,7 @@ export function SettingsDialog({ open, onOpenChange }: { open: boolean; onOpenCh
             )}
             <p className="text-[12px] leading-relaxed text-faint">
               Providers are chosen with environment variables on the server (<code className="font-mono text-muted">LLM_PROVIDER</code>,{" "}
-              <code className="font-mono text-muted">SEGMENTATION_PROVIDER</code>). API keys never reach the browser. See the README section “Connecting Llama / SAM 2”.
+              <code className="font-mono text-muted">SEGMENTATION_PROVIDER</code>). API keys never reach the browser. See the README section “Connecting SAM 3 or SAM 2”.
             </p>
           </section>
 
@@ -181,7 +181,7 @@ export function SettingsDialog({ open, onOpenChange }: { open: boolean; onOpenCh
           </section>
 
           <p className="text-[11.5px] leading-relaxed text-faint">
-            OpenSAM Studio is an independent tool built around open AI models including SAM 2 and Llama. It is not affiliated with or endorsed by Meta.
+            OpenSAM Studio is an independent tool built around open AI models including SAM 3, SAM 2 and Llama. It is not affiliated with or endorsed by Meta.
           </p>
         </div>
       </DialogContent>

@@ -1,4 +1,4 @@
-"""OpenSAM Studio inference server (SAM 2 + optional text grounding).
+"""OpenSAM Studio inference server: SAM 3 (MODEL_FAMILY=sam3) or SAM 2.
 
 HTTP contract consumed by services/sam2/SAM2Provider.ts:
 
@@ -33,7 +33,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from . import rle
-from .backend import Backend, Keyframe, Sam2Backend
+from .backend import Backend, Keyframe, make_backend
 
 SESSION_ID = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_MB", "2048")) * 1024 * 1024
@@ -102,7 +102,7 @@ class GroundIn(BaseModel):
 
 def create_app(backend: Optional[Backend] = None) -> FastAPI:
     app = FastAPI(title="OpenSAM Studio inference server", version="1.0.0")
-    app.state.backend = backend or Sam2Backend()
+    app.state.backend = backend or make_backend()
     api_key = os.environ.get("INFERENCE_API_KEY")
 
     def auth(authorization: Optional[str] = Header(default=None)) -> None:

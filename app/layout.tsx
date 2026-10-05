@@ -7,7 +7,7 @@ import "./globals.css";
 export const metadata: Metadata = {
   title: "OpenSAM Studio — Rotoscoping, powered by AI",
   description:
-    "Upload a video, tell AI what to isolate, and OpenSAM Studio segments and tracks it for you. An independent tool built around open AI models including SAM 2 and Llama.",
+    "Upload a video, tell AI what to isolate, and OpenSAM Studio segments and tracks it for you. An independent tool built around open AI models including SAM 3, SAM 2 and Llama.",
   icons: { icon: "/icon.svg" },
 };
 

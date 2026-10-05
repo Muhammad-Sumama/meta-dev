@@ -63,7 +63,7 @@ const EnvSchema = z.object({
   LLAMA_TIMEOUT_MS: z.coerce.number().int().min(1000).max(300_000).default(20_000),
   LLAMA_FALLBACK_TO_RULES: bool.default(true),
 
-  SEGMENTATION_PROVIDER: z.enum(["mock", "sam2"]).default("mock"),
+  SEGMENTATION_PROVIDER: z.enum(["mock", "sam2", "sam3"]).default("mock"),
   /** One inference server, or a comma-separated pool (videos stick to one server, with failover). */
   SAM2_SERVICE_URL: z
     .string()
@@ -119,7 +119,7 @@ export interface PublicConfig {
   analysisMaxSize: number;
   llmProvider: "mock" | "llama";
   llamaModel: string | null;
-  segmentationProvider: "mock" | "sam2";
+  segmentationProvider: "mock" | "sam2" | "sam3";
 }
 
 export function publicConfig(): PublicConfig {

@@ -6,8 +6,9 @@
 #
 # web and worker share nothing but Redis (jobs), PostgreSQL (projects) and
 # MinIO (media, S3 API) — each has its own cache volume — so the same setup
-# works with them on separate machines. For SAM 2 set SEGMENTATION_PROVIDER=sam2
-# in .env (and INFERENCE_API_KEY); for Llama set LLM_PROVIDER=llama and LLAMA_BASE_URL.
+# works with them on separate machines. For SAM 3 set SEGMENTATION_PROVIDER=sam3 and
+# HF_TOKEN in .env (and INFERENCE_API_KEY); for SAM 2 set SEGMENTATION_PROVIDER=sam2 and
+# MODEL_FAMILY=sam2. For Llama set LLM_PROVIDER=llama and LLAMA_BASE_URL.
 name: opensam
 
 x-app: &app
@@ -120,6 +121,8 @@ services:
     restart: unless-stopped
     environment:
       INFERENCE_API_KEY: ${INFERENCE_API_KEY:-}
+      MODEL_FAMILY: ${MODEL_FAMILY:-sam3}
+      HF_TOKEN: ${HF_TOKEN:-}
     volumes:
       - hf-cache:/root/.cache/huggingface
     deploy:

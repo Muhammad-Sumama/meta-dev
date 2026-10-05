@@ -110,7 +110,7 @@ export const AIPanel = forwardRef<AIPanelHandle, { onOpenExport(preset: "mask" |
           >
             <Badge variant={lang.kind === "mock" || seg.kind === "mock" ? "warning" : "success"} className="cursor-default">
               <Cpu className="size-3" />
-              {seg.kind === "mock" ? "Mock inference" : "SAM 2"}
+              {seg.kind === "mock" ? "Mock inference" : seg.name}
               {lang.kind === "production" ? " · Llama" : ""}
             </Badge>
           </Hint>
